@@ -183,7 +183,7 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | HIGH_TURNOVER | ≤ 70% | 换手爆炸 | 增大 decay、trade_when、混合 |
 | CONCENTRATED_WEIGHT | 单股 < 10% 且分散 | 权重集中 | 用 rank()、降低 truncation、ts_backfill |
 | LOW_SUB_UNIVERSE_SHARPE | TOP1000 也有效 | 小票依赖 | 用基本面、SUBINDUSTRY、避免市值倾斜 |
-| SELF_CORRELATION | **日收益** 相关系数 < 0.7 | 与已有因子太像 | 换信号簇、加过滤、换 Universe；不要只调参数 |
+| SELF_CORRELATION | **信号级** 相关系数 < 0.7，且新 Sharpe ≥ 冲突因子 × 1.1 | 与已上线因子太像（同信号簇） | 换信号簇/换数据来源；**不要只调参数或换窗口**。注意：此检查用信号级相关（≈0.9+），日收益相关只是 proxy 会低估，详见 7.2/7.5 |
 | MATCHES_COMPETITION | 信息性 | — | 无影响 |
 
 ### 5.3 失败统计
@@ -208,6 +208,7 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | DD > 15% | 波动大/杠杆高 | 增大 decay、降 truncation、混合低波信号 |
 | CONCENTRATED_WEIGHT FAIL | 稀疏/极值 | rank()、truncation 0.05、ts_backfill |
 | Sub-Universe FAIL | 小票依赖 | 避免 `rank(-assets)`，用 group_rank、加流动性过滤 |
+| 新闻/事件类信号 TO > 60%（如 Bull Trap：`news_pct_1min` 斜率 × `news_max_up_ret`） | 事件驱动字段日间跳变 + 短窗斜率相乘、无平滑（2026-08 实测：TO=65%、Fitness 0.93 FAIL） | **0.3 新闻 + 0.7 基本面**：`0.3*新闻信号 + 0.7*group_rank(ts_rank(operating_income/equity,126),subindustry)` → TO 65%→26%、Sharpe 1.57→1.73、DD 15.4%→5.9%；新闻部分再包 `ts_decay_linear(信号,5)` → TO 15.3%、Fitness 1.24（INDUSTRY 中性化）。**不要**拉长回归窗口（5→20 伤 Sharpe 至 1.41）或设置层 decay=15（Sharpe 打穿至 1.18）；新闻信号配 SUBINDUSTRY 反而 Fitness FAIL（0.98） |
 | simulation_error | 字段不存在/算子参数错误 | 先 rank(field) 验证字段，检查算子参数个数 |
 | trade_when 零交易 | 条件过严 | 放宽条件或用 if_else |
 
@@ -254,44 +255,119 @@ assert resp.status_code == 201, f"认证失败: {resp.status_code} {resp.text}"
 print("认证成功")
 ```
 
-### 7.2 获取已提交 Alpha 并计算相关性
+### 7.2 获取已提交 Alpha 并计算相关性（双层护栏）
 
-**目的**：在新因子提交前，避免与已有因子 PnL 高度相关（相关系数 ≥ 0.7）。
+**目的**：在新因子提交前，避免与已上线因子撞 SELF_CORRELATION。两层护栏：
+
+- **护栏 1（日收益相关，proxy）**：按日期交集对齐算日收益相关，< 0.7 才算安全。**但这是 proxy，会低估信号级相关**（见下方实战教训）。
+- **护栏 2（信号成分重叠，关键）**：提取候选的核心 `group_rank(...)` 信号，与已上线 alpha 的表达式做子串匹配。若候选信号是某已上线 alpha 的子串，则两者**信号级相关 ≈ 0.9**，WQ 的 SELF_CORRELATION 必 FAIL。护栏 2 只比表达式、不拉 PnL，便宜且能提前拦截近复制品。
 
 ```python
+import re
 import numpy as np
 
-def fetch_pnl(session, alpha_id):
-    """获取 Alpha 累计 PnL 序列；schema.properties 可能是 list 或 dict。"""
-    r = session.get(f"{API_BASE}/alphas/{alpha_id}/recordsets/pnl")
-    if r.status_code != 200 or not r.text.strip():
+# ---------- 数据拉取 ----------
+def fetch_pnl(session, alpha_id, retries=4):
+    """获取 Alpha PnL 序列，返回 [(date, value), ...]。空结果重试 ≥3 次。"""
+    for _ in range(retries):
+        r = session.get(f"{API_BASE}/alphas/{alpha_id}/recordsets/pnl")
+        if r.status_code == 200 and r.text.strip():
+            data = r.json()
+            props = data.get("schema", {}).get("properties", [])
+            if isinstance(props, list):
+                date_idx = next((i for i, p in enumerate(props) if p.get("name","").lower()=="date"), 0)
+                pnl_idx = next((i for i, p in enumerate(props) if p.get("name","").lower() in ("pnl","cum_pnl","returns","ret")), 1)
+            else:
+                date_idx = next((v["index"] for k,v in props.items() if k.lower()=="date"), 0)
+                pnl_idx = next((v["index"] for k,v in props.items() if k.lower() in ("pnl","cum_pnl","returns","ret")), 1)
+            recs = sorted(data.get("records", []), key=lambda r: r[date_idx])
+            out = []
+            for row in recs:
+                rec = row[0] if isinstance(row, list) and len(row)==1 and isinstance(row[0], list) else row
+                try:
+                    out.append((rec[date_idx], float(rec[pnl_idx])))
+                except Exception:
+                    continue
+            if out:
+                return out
+        time.sleep(8)
+    return []
+
+def to_returns(pnl):
+    """累计曲线→日收益；日收益序列原样返回。**保留 (date, value) 以便按日期对齐**。
+    判据：水平波动 std(a) 远大于日变化 std(diff(a))（>5×）即累计曲线；旧 mean/std 启发式对慢牛会误判。"""
+    if len(pnl) < 30:
         return []
-    data = r.json()
-    props = data.get("schema", {}).get("properties", [])
-    if isinstance(props, list):
-        date_idx = next((i for i, p in enumerate(props) if p.get("name", "").lower() == "date"), 0)
-        pnl_idx = next((i for i, p in enumerate(props) if p.get("name", "").lower() in ("pnl", "cum_pnl", "returns", "ret")), 1)
-    else:
-        date_idx = next((v["index"] for k, v in props.items() if k.lower() == "date"), 0)
-        pnl_idx = next((v["index"] for k, v in props.items() if k.lower() in ("pnl", "cum_pnl", "returns", "ret")), 1)
-    records = sorted(data.get("records", []), key=lambda r: r[date_idx])
-    out = []
-    for row in records:
-        rec = row[0] if isinstance(row, list) and len(row) == 1 and isinstance(row[0], list) else row
-        try:
-            out.append(float(rec[pnl_idx]))
-        except Exception:
-            continue
-    return out
+    a = np.asarray([v for _, v in pnl], dtype=float)
+    d = np.diff(a)
+    if d.std() > 0 and a.std() > 5 * d.std():
+        return [(pnl[i+1][0], float(d[i])) for i in range(len(d))]   # 累计曲线→日收益（带日期）
+    return [(dt, float(v)) for dt, v in pnl]                         # 已是日收益序列（带日期）
 
-def daily_returns(cum_pnl):
-    """累计 PnL 转日收益；相关性应基于日收益，而非累计曲线。"""
-    return [cum_pnl[i+1] - cum_pnl[i] for i in range(len(cum_pnl) - 1)]
+def aligned_corr(new_ret, old_ret):
+    """按日期交集对齐后算日收益相关（位置对齐会低估相关）。"""
+    if len(new_ret) < 30 or len(old_ret) < 30:
+        return None
+    nd = {dt: v for dt, v in new_ret} if isinstance(new_ret[0], tuple) else None
+    # 若传入的是 (date,val) 列表，先转成对齐序列
+    if nd is not None:
+        common = [dt for dt, _ in old_ret if dt in nd]
+        if len(common) < 30:
+            return None
+        y1 = [nd[dt] for dt, _ in old_ret if dt in nd]
+        y2 = [v for dt, v in old_ret if dt in nd]
+        return float(np.corrcoef(y1, y2)[0, 1])
+    n = min(len(new_ret), len(old_ret))
+    return float(np.corrcoef(new_ret[-n:], old_ret[-n:])[0, 1])
 
+# ---------- 护栏 2：信号成分重叠（关键）----------
+def _balanced_close(s, open_idx):
+    depth = 0
+    for i in range(open_idx, len(s)):
+        if s[i] == "(": depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+def main_signal(expr):
+    """提取核心排名信号（最外层 group_rank(...) / rank(...)）。"""
+    e = (expr or "").replace("\n", " ")
+    idx = e.find("group_rank(")
+    if idx >= 0:
+        k = e.find("(", idx); j = _balanced_close(e, k)
+        if j > 0:
+            return e[idx:j+1]
+    for fn in ("rank(", "ts_rank(", "ts_zscore(", "zscore("):
+        idx = e.find(fn)
+        if idx >= 0:
+            k = e.find("(", idx); j = _balanced_close(e, k)
+            if j > 0:
+                return e[idx:j+1]
+    return e.strip()
+
+def norm(e): return re.sub(r"\s+", "", (e or "")).lower()
+
+def signal_overlap(cand_expr, active_exprs):
+    """候选核心信号是否⊂某已上线 alpha 表达式（或反之）。命中→信号级相关≈0.9，必撞 SELF_CORRELATION。
+    active_exprs: {alpha_id: expression}。"""
+    cm = norm(main_signal(cand_expr))
+    hits = []
+    for oid, oexpr in active_exprs.items():
+        on = norm(oexpr)
+        if cm and cm in on:
+            hits.append(oid)
+        else:
+            om = norm(main_signal(oexpr))
+            if om and om in norm(cand_expr):
+                hits.append(oid)
+    return hits
+
+# ---------- 使用示例 ----------
 def get_active_alphas(session, user_id="self", limit=100):
     """获取所有 alpha（含 ACTIVE / UNSUBMITTED），分页。"""
-    all_alphas = []
-    offset = 0
+    all_alphas, offset = [], 0
     while True:
         data = session.get(f"{API_BASE}/users/{user_id}/alphas", params={"limit": limit, "offset": offset}).json()
         batch = data.get("results", data.get("alphas", []))
@@ -303,39 +379,39 @@ def get_active_alphas(session, user_id="self", limit=100):
         offset += limit
     return all_alphas
 
-# 计算新因子与所有 ACTIVE alpha 的日收益相关性
+active = [a for a in get_active_alphas(session) if a.get("status") == "ACTIVE"]
+
+# 护栏 2：先比表达式（便宜，不用拉 PnL）
+active_exprs = {a["id"]: (a.get("regular") or {}).get("code", "") or a.get("expression", "") for a in active}
+overlap = signal_overlap(new_expr, active_exprs)   # new_expr = 候选表达式字符串
+if overlap:
+    print(f"⚠️ 信号成分重叠（SELF_CORRELATION 将 FAIL）: {overlap} — 建议放弃或换信号簇")
+
+# 护栏 1：日收益相关（proxy，按日期对齐）
 new_pnl = fetch_pnl(session, new_alpha_id)
-new_ret = daily_returns(new_pnl)
-existing = get_active_alphas(session)
-active = [a for a in existing if a.get("status") == "ACTIVE"]
-
-high_corr = []
+new_ret = to_returns(new_pnl)
 for alpha in active:
-    old_id = alpha.get("id")
-    try:
-        old_pnl = fetch_pnl(session, old_id)
-        old_ret = daily_returns(old_pnl)
-        if len(new_ret) == len(old_ret) and len(new_ret) > 20:
-            corr = float(np.corrcoef(new_ret, old_ret)[0, 1])
-            print(f"与 {old_id} 日收益相关性: {corr:.3f}")
-            if abs(corr) >= 0.7:
-                high_corr.append((old_id, corr))
-    except Exception:
-        continue
-
-if high_corr:
-    print(f"⚠️ 发现 {len(high_corr)} 个高相关因子，建议修改或放弃")
+    old = fetch_pnl(session, alpha["id"])
+    old_ret = to_returns(old)
+    c = aligned_corr(new_ret, old_ret)
+    if c is not None:
+        flag = "❌" if abs(c) >= 0.7 else ("⚠️" if abs(c) >= 0.5 else "✅")
+        print(f"{flag} 与 {alpha['id']} 日收益相关: {c:+.3f}")
 ```
 
-**判断规则（基于日收益，不是累计 PnL）**：
+**判断规则**：
 
-| 相关系数 | 动作 |
-|----------|------|
-| abs(corr) < 0.5 | ✅ 可提交 |
-| 0.5 ≤ abs(corr) < 0.7 | ⚠️ 谨慎，需提升 Sharpe 或修改信号 |
-| abs(corr) ≥ 0.7 | ❌ 放弃或重构（除非新因子 Sharpe ≥ 旧因子 × 1.1） |
+| 信号成分重叠 | 日收益相关 | 动作 |
+|------|------|------|
+| 命中 | — | ❌ 直接放弃（信号级相关≈0.9，必 FAIL） |
+| 未命中 | abs < 0.5 | ✅ 可提交 |
+| 未命中 | 0.5 ≤ abs < 0.7 | ⚠️ 谨慎，需新 Sharpe ≥ 冲突因子 × 1.1 |
+| 未命中 | abs ≥ 0.7 | ❌ 放弃或重构（除非新 Sharpe ≥ 旧 × 1.1） |
 
-> ⚠️ **不要用累计 PnL 算相关**。累计曲线自带强趋势，会把不同信号的相关性严重夸大。
+> ⚠️ **不要用累计 PnL 算相关**（累计曲线自带趋势，会把所有因子看成同一个，相关普遍 > 0.90）。
+> ⚠️ **日收益相关只是 proxy**：WQ 的 SELF_CORRELATION 用信号级相关，近复制品（共享同一核心 `group_rank(...)` 信号）的日收益相关可能只有 0.4–0.5，但信号级相关 0.9+ 仍会 FAIL。**护栏 2 比护栏 1 更可靠**，提交前必跑。
+
+**实战教训（2026-08-30）**：纯信号版 `F3 = group_rank(ts_rank(raw, 60), subindustry)`（S=1.81）与已上线 `M3 = 0.6*sg + 0.4*OI`（sg 同信号，S=2.56）日收益相关仅 0.465（看似安全），但信号成分重叠 → 提交后 SELF_CORRELATION **FAIL 0.9313**（>0.7 且 Sharpe 未高 10%），被拒。加护栏 2 后复跑即拦下 `候选信号⊂已上线 gJjLJvlm`。
 
 ### 7.3 回测
 
@@ -370,13 +446,29 @@ alpha = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
 sub = session.post(f"https://api.worldquantbrain.com/alphas/{alpha_id}/submit")
 print(sub.status_code)  # 201 成功
 
-# 监控 SELF_CORRELATION
-for _ in range(30):
-    alpha = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
-    sc = next((c for c in alpha.get("is", {}).get("checks", []) if c["name"] == "SELF_CORRELATION"), {})
-    if sc.get("result") in ("PASS", "FAIL"):
+# 监控 SELF_CORRELATION（提交后检查才从 PENDING 跑出结果；value 字段常缺，须从 message 回退解析）
+import re
+
+def self_corr(session, alpha_id):
+    a = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
+    sc = next((c for c in a.get("is", {}).get("checks", []) if c["name"] == "SELF_CORRELATION"), {})
+    result, value, msg = sc.get("result"), sc.get("value"), ""
+    for fld in ("message", "description", "detail"):
+        if sc.get(fld):
+            msg = str(sc[fld]); break
+    if value is None and msg:
+        m = re.search(r"([0-9]+\.[0-9]+)", msg)
+        if m:
+            value = float(m.group(1))
+    return result, value, msg
+
+for _ in range(60):   # 最多 ~10 分钟；必须等到离开 PENDING，否则只看得到 None
+    result, value, msg = self_corr(session, alpha_id)
+    print(f"t+{_*10}s SELF_CORR={result} value={value} {msg}")
+    if result in ("PASS", "FAIL"):
         break
-    time.sleep(60)
+    time.sleep(10)
+# result=FAIL 时 value 即信号级相关系数（如 0.9313），msg 含 'above cutoff of 0.7' 与 Sharpe 比较结论
 ```
 
 ### 7.5 自动提交模板
@@ -384,10 +476,11 @@ for _ in range(30):
 ```python
 import numpy as np
 
-def simulate_and_submit(expression, settings, existing_pnls=None):
+def simulate_and_submit(expression, settings, existing=None, cand_expr=None):
     """
-    existing_pnls: {alpha_id: [cum_pnl_values]}，已上线因子的累计 PnL 序列。
-    返回: {"alpha_id": ..., "decision": "submitted|skip|high_corr|verify_failed", ...}
+    existing: {alpha_id: {"pnl": [(date,val)...], "expr": "...", "sharpe": x}}，已上线因子元数据。
+    cand_expr: 候选表达式字符串（信号成分重叠护栏用；缺省回退用 expression）。
+    返回: {"alpha_id": ..., "decision": "submitted|skip|high_corr|signal_overlap|verify_failed", ...}
     """
     payload = {"type": "REGULAR", "settings": settings, "regular": expression}
     resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
@@ -409,39 +502,44 @@ def simulate_and_submit(expression, settings, existing_pnls=None):
     if is_.get("fitness", 0) < 1.1 or is_.get("sharpe", 0) < 1.3 or is_.get("turnover", 1) > 0.20:
         return {"alpha_id": alpha_id, "decision": "skip", "reason": "metrics", "metrics": is_}
 
-    # 2. 相关性检查（基于日收益）
-    def daily_rets(cum):
-        return [cum[i+1] - cum[i] for i in range(len(cum) - 1)]
+    # 2. 护栏 2：信号成分重叠（关键，只比表达式、不拉 PnL）
+    cexpr = cand_expr or expression
+    if existing:
+        active_exprs = {oid: m.get("expr", "") for oid, m in existing.items()}
+        ov = signal_overlap(cexpr, active_exprs)
+        if ov:
+            return {"alpha_id": alpha_id, "decision": "signal_overlap",
+                    "overlap_with": ov, "reason": "信号级相关≈0.9，SELF_CORRELATION 将 FAIL"}
 
-    if existing_pnls:
-        new_pnl = fetch_pnl(session, alpha_id)
-        new_ret = daily_rets(new_pnl)
-        for old_id, old_pnl in existing_pnls.items():
-            old_ret = daily_rets(old_pnl)
-            if len(new_ret) == len(old_ret) and len(new_ret) > 20:
-                corr = abs(float(np.corrcoef(new_ret, old_ret)[0, 1]))
-                if corr >= 0.7:
-                    # 例外：新 Sharpe 高于旧 Sharpe 10% 以上可提交
-                    old_sharpe = None  # 需从外部传入或缓存
-                    if old_sharpe is None or is_.get("sharpe", 0) < old_sharpe * 1.1:
-                        return {"alpha_id": alpha_id, "decision": "high_corr", "corr_with": old_id, "corr": corr}
+    # 3. 护栏 1：日收益相关（proxy，按日期对齐；豁免：新 Sharpe ≥ 冲突因子 × 1.1）
+    if existing:
+        new_ret = to_returns(fetch_pnl(session, alpha_id))
+        for old_id, m in existing.items():
+            old_ret = to_returns(m.get("pnl", []))
+            c = aligned_corr(new_ret, old_ret)
+            if c is not None and abs(c) >= 0.7:
+                old_sharpe = m.get("sharpe")
+                if old_sharpe is None or is_.get("sharpe", 0) < old_sharpe * 1.1:
+                    return {"alpha_id": alpha_id, "decision": "high_corr",
+                            "corr_with": old_id, "corr": c}
 
-    # 3. 提交
+    # 4. 提交（201 只表示请求被接受，≠ 已上线）
     sub = session.post(f"https://api.worldquantbrain.com/alphas/{alpha_id}/submit")
     if sub.status_code not in (200, 201):
         return {"alpha_id": alpha_id, "decision": "submit_failed", "status": sub.status_code}
 
-    # 4. 验证是否真正上线（BRAIN 可能因 SELF_CORRELATION 保持 UNSUBMITTED）
+    # 5. 验证是否真正上线（BRAIN 可能因 SELF_CORRELATION 保持 UNSUBMITTED；提交被限频也会停在 UNSUBMITTED）
     for _ in range(20):
         time.sleep(10)
         alpha = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
         if alpha.get("status") == "ACTIVE":
             return {"alpha_id": alpha_id, "decision": "submitted", "status": "ACTIVE"}
-        sc = next((c for c in alpha.get("is", {}).get("checks", []) if c["name"] == "SELF_CORRELATION"), {})
-        if sc.get("result") == "FAIL":
-            return {"alpha_id": alpha_id, "decision": "self_correlation_fail", "status": alpha.get("status")}
-
-    return {"alpha_id": alpha_id, "decision": "verify_failed", "status": alpha.get("status")}
+        result, value, msg = self_corr(session, alpha_id)
+        if result == "FAIL":
+            return {"alpha_id": alpha_id, "decision": "self_correlation_fail",
+                    "self_corr": value, "msg": msg, "status": alpha.get("status")}
+    st = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json().get("status")
+    return {"alpha_id": alpha_id, "decision": "verify_failed", "status": st}
 ```
 
 ### 7.6 限流
@@ -526,6 +624,7 @@ print(f"total={len(all_alphas)}, ACTIVE={len(active)}")
 - 换窗口、换权重、换 neutralization **不能创造真正的低相关**。
 - 真正的低相关来自 **完全不同的数据来源或经济逻辑**（如：宏观事件、期权流、跨境、另类数据）。
 - 在常规 USA TOP3000 基本面/价量/分析师池子里，"低相关" 往往是 **0.3–0.6 的日收益相关**，不要追求 0。
+- ⚠️ **WQ 的 SELF_CORRELATION 检查用信号级相关（≈0.9+），不是日收益相关**。两个 alpha 若共享同一核心 `group_rank(...)` 信号（如 `0.6*sg + 0.4*OI` 与纯 `sg`），日收益相关可能只有 0.4–0.5，但信号级相关 0.93，提交必 FAIL（"above cutoff of 0.7 and Sharpe not better by 10%"）。**提交前必跑信号成分重叠护栏**（见 7.2/7.5），日收益相关只是 proxy。
 
 ---
 
@@ -618,6 +717,68 @@ pyenv exec python scripts/evolve_skill.py --apply
 
 > 本节仅保留机制说明。真实运行生成的 alpha ID、表达式、PnL、提交状态和相关性记录可能关联个人账号与研究资产，默认写入本地 `alpha_db.json`，不随仓库发布。
 > 若需要沉淀通用经验，请人工汇总成脱敏规则后再写回第 4、5、6、8、10 节。
+
+### 2026-08-13 — cap 回归中性化模板挖掘（YPvlEl0l 提交 ACTIVE）
+
+用户模板（Pasted text #5，含 `regression_neut`/`vec_avg({data})`/`group_normalize`/`vec_count`/`rsk82_*` 等）：
+```
+regression_neut(regression_neut(group_neutralize(group_zscore(vec_avg({data}),sector),bucket(rank(cap),range="0.1,1,0.1")),group_neutralize(group_zscore(cap,sector),bucket(...))),ts_ir(returns-group_median(returns,sector),126))
+fear = ts_mean(abs(returns-group_mean(returns,1,market))/(abs(returns)+abs(group_mean(returns,1,market))+0.1),20);-group_neutralize(fear*group_normalize(ts_decay_exp_window(ts_percentage(vec_count(rsk82_...),60,percentage=0.9)-ts_percentage(vec_count({data}),60,percentage=0.1),20,factor=0.8),market)*inverse(abs(ts_entropy(volume,20))),bucket(rank(cap),range="0.1,1,0.1"))
+```
+USA TOP3000 delay=1 实证结论（`{data}` 占位符，用户建议试 ROE/现金流字段）：
+1. **模板算子大面积不可用**（逐个探针验证）：`regression_neut`、`group_normalize`、`vec_count`、`vec_avg`(标量)、`ts_ir`、`ts_percentage`、`ts_decay_exp_window`、`ts_entropy`、`inverse`、`group_median`、`sector` 字段均报 unknown operator/field。可用算子仅 rank/group_rank/ts_rank/ts_mean/group_zscore/group_neutralize/bucket/group_mean。
+2. **落地模板核心语义**：Part1 的「data 相对 cap 回归中性」用 `sig = group_zscore({data},subindustry) - group_zscore(cap,subindustry)`（cap zscore 相减近似回归中性）；`sector`→`subindustry`。Part2 的 fear 项依赖算子全不可用，放弃（且 Part1 相对收益分量 `ts_rank(returns-group_mean(returns,1,subindustry),126)` 实测负贡献，Sharpe 1.49→0.94）。
+3. **现金流字段最优**：`cashflow_op/equity`（经营现金流/equity）Sharpe 1.63/Fit 1.11/TO 7.6% 过线；`free_cash_flow_reported_value/equity` Fit 0.98 接近；ROE 类（`operating_income/equity`、`return_equity/close`）Fit 仅 0.86-0.88（Returns 4.4% 太低）。**现金流 > ROE**。
+4. **group_mean 需 3 参数**：`group_mean(x,1,group)`，写 `group_mean(returns,subindustry)` 会报 "Invalid number of inputs : 2, should be exactly 3"。
+5. 复杂多层 group 嵌套表达式模拟极慢（超 8 分钟超时），需精简到与上轮 GrGmXvwx 相当的结构复杂度（约 2 分钟跑完）。
+6. 最终提交（**YPvlEl0l ACTIVE**，Sharpe=1.63, Fit=1.11, Returns=5.8%, TO=7.6%, DD=3.0%，全部 IS check PASS，与 19 个 ACTIVE 最高日收益相关 +0.558 vs GrGmXvwx，唯一 ≥0.5 且 <0.7 可提交）：
+`group = bucket(rank(cap),range="0.1,1,0.1"); sig = group_zscore(cashflow_op/equity,subindustry) - group_zscore(cap,subindustry); group_neutralize(ts_mean(group_rank(ts_rank(sig,126),subindustry),2),group)`，Decay=10, Neutralize=INDUSTRY。
+7. SELF_CORRELATION 提交前显示 PENDING，提交后 status 立即 ACTIVE（提交即触发重新评估并 PASS）——不必等 PENDING 转 PASS 再提交。
+
+---
+
+### 2026-08-13 — bucket(cap) × 期权 breakeven × OI 模板挖掘（GrGmXvwx 提交 ACTIVE）
+
+用户模板（含 `vec_min({Analyst Std})`/`vec_max({OptionHighPrice})` 占位符）：
+```
+group = bucket(rank(cap),range='0.1,1,0.1');
+risk = rank(-ts_av_diff(vec_min({Analyst Std}),360));
+alpha = rank((1-risk)*group_rank(ts_scale(vec_max({OptionHighPrice})/close,120),industry));
+group_neutralize(ts_mean(alpha,2),group)
+Decay=10, Neutralize=industry
+```
+USA TOP3000 delay=1 实证结论：
+1. **`vec_min`/`vec_max` 算子在本 universe 不可用**（"unknown operator"），`vec_avg` 仅接受事件输入——三者均需去除，直接用单字段。
+2. `{Analyst Std}` 用 analyst4 预期 std（如 `anl4_fs_detail_estimates_advanced_af_nd_epsr_std`、`..._basic_qf_v4_nd_eps_std`）；`{OptionHighPrice}` 用 Options Analytics 的 `call_breakeven_360/180/1080`（看涨盈亏平衡价/close，贴合"期权隐含高价"语义）效果最好，`forward_price_*` 极弱（Sharpe 0.03）。
+3. **risk 项（分析师分歧 ts_av_diff）在本模板是负贡献**：去掉 risk 项后 Sharpe 0.8→1.42；调低 risk 权重（0.3）反而更差。`bucket(rank(cap),range='0.1,1,0.1')` 市值分桶（剔除最小 10% 市值）+ `group_neutralize(ts_mean(alpha,2),group)` 结构保留有效。
+4. **关键提升是混合基本面**：`+ 0.5~0.7*group_rank(ts_rank(operating_income/equity,126),subindustry)`，权重 0.6 最优。
+5. 最终提交（**GrGmXvwx ACTIVE**，Sharpe=1.50, Fit=1.28, Returns=9.1%, TO=9.2%, DD=4.6%，全部 IS check PASS，与 18 个 ACTIVE 最高日收益相关 0.501）：
+`group = bucket(rank(cap),range='0.1,1,0.1'); sig = group_rank(ts_rank(call_breakeven_360/close,120),industry); alpha = rank(sig) + 0.6*group_rank(ts_rank(operating_income/equity,126),subindustry); group_neutralize(ts_mean(alpha,2),group)`，Decay=10, Neutralize=INDUSTRY。
+6. 纯期权 breakeven 信号本身只有 0.9 左右 Sharpe，不混合基本面无法过线——再次印证「期权/技术信号必须混合基本面」的经验。
+
+---
+
+### 2026-08-16 — mdl77_2gdna_actrtn12m × ROE × 资产负债率（VkGQxanA / QPGRvdV5 提交 ACTIVE）
+
+用户指定字段 `mdl77_2gdna_actrtn12m`（想表达「低估+好盈利→做多」）。USA TOP3000 delay=1 实证结论：
+
+1. **新模型字段以 API 精确查询为准**：`GET /data-fields/{id}` 命中（Analysts' Factor Model, MATRIX, 12-Month Active Return with 1-Month Lag = t-13→t-1 价格变化）；本地字段快照（4367 个）不含 mdl77 系列与 `total_liabilities`/`total_assets`。search 端点对短词返回 400 "Invalid query"，精确查询更可靠。
+2. **MATRIX 字段可直接 rank/group_rank**：`mdl77_2gdna_actrtn12m`、`assets`、`liabilities` 均无需 vec_avg/ts_backfill 即可用于截面算子。
+3. **`trade_when(x, matrix_field<0, 1)` 会零交易**（longCount=0、TO=0）：MATRIX 与标量比较恒 False；条件需先转换，如 `rank(matrix_field)<0.5`。
+4. **12 个月滞后收益是动量不是低估**：正方向 `group_rank(mdl77_2gdna_actrtn12m,subindustry)` Sharpe 1.07；反转方向（做多跌得多的）无效（-0.22 到 0.47）——「做多被低估股」的直觉在 USA TOP3000 不成立。
+5. **低负债率单独是负 alpha（-0.72）**：高杠杆有正风险溢价；「低负债=稳健」只能作 ≤0.2 小权重质量过滤，不能当主信号。
+6. **ROE 分量已过载 + est_eps 是相关性炸弹**：ACTIVE 池至少 4 个 alpha 含 ROE（wpEr87Ax/MPGx5EZk/KPGLLpPE/pwN5e7KX），新 alpha ROE 权重 >0.3 必撞相关线（0.799）；`est_eps/close` 撞分析师簇（与 9q7nYrZe/blQ8Q7kN/MPGx5EZk 相关 0.69-0.74）。
+7. **降相关配方 = 独特信号高权重 + 过载信号低权重**：mdl77 动量与现有池不同源，权重 0.5-0.7；ROE 压到 0.3——相关从 0.799 降到 0.68。
+8. **提交判据**：模拟 8 checks 全 PASS + 日收益相关 <0.7 → 提交后 SELF_CORRELATION 基本一次过、90s 内 ACTIVE（两次提交 VkGQxanA、QPGRvdV5 均验证）。
+9. 提交 F（**VkGQxanA ACTIVE**，Sharpe=1.41, Fit=1.03, TO=6.3%, DD=6.4%，最高相关 0.678）：
+`0.3*group_rank(ts_rank(operating_income/equity,126),subindustry)+0.5*group_rank(mdl77_2gdna_actrtn12m,subindustry)+0.2*group_rank(-liabilities/assets,subindustry)`（decay=0, SUBINDUSTRY）
+10. 备选 E（**QPGRvdV5 提交**，Sharpe=1.44, Fit=1.17, TO=5.7%，最高相关 0.692）：`0.3*ROE+0.7*动量`（无负债率分量）。强指标版（0.6ROE+0.4动量 Sharpe 2.05、加 est_eps 后 2.58）均因相关 ≥0.74 被否。
+11. **SELF_CORRELATION 血泪教训（E 被拒 0.9622）**：E 与刚 ACTIVE 的 F（VkGQxanA）同簇（共享 0.3ROE + mdl77 主信号），F 先上线后 E 提交必撞 0.96。**对照池包含提交时刻所有 ACTIVE，刚提交的 alpha 立即成为冲突源**；多候选时先提交最优，其余同簇候选直接放弃，不要逐个试。提交豁免：新 Sharpe ≥ 冲突 alpha × 1.1 可过。
+12. **与已上线同簇 alpha 降相关的有效杠杆 = 换信号主导权**：mdl77 权重 0.7→0.2 + 反转（`rank(-(close-open)/open)`）权重 0.5，相关 0.962→<0.5；decay 反而让组合贴近旧 alpha 的慢信号形状（0.757→0.918）；换中性化/换 ROA 无效（0.933）。
+13. **反转分量 + decay=5 是 TO/Fitness 甜点**：`0.3*ROE+0.2*mdl77动量+0.5*反转` decay=5 → Sharpe 3.15/Fit 2.19/TO 34.3%（decay=0 时 TO 56%、Fitness 1.23）。反转主导组合（超跌+高ROE+弱趋势确认）本身就是「错杀好公司」的低相关实现。
+14. **SELF_CORRELATION 检查代码**：必须按**日期交集**对齐算日收益相关（位置对齐会低估相关）；PnL recordset 空结果重试 ≥3 次；高相关时打印冲突源表达式。
+
+
 
 
 
