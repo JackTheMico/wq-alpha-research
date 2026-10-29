@@ -203,7 +203,9 @@ if not ok:
 #### 4.1.2 模板库（已标注 dataset）
 
 ```fastexpr
--- 模板 A：ROE 趋势（通过率最高；主信号 fundamental6：operating_income, equity）
+-- 模板 A：ROE 趋势（主信号 fundamental6：operating_income, equity）
+-- ⚠️ 旧注「通过率最高」指的是「最不容易报错、最容易跑出结果」，**不是**「能过顾问门槛」。
+--    2026-10-29 USA TOP3000 D1 实测：Sharpe 1.23 / Fitness 0.58，未过 1.58 / 1.0。
 group_rank(ts_rank(operating_income / equity, 126), subindustry)
 
 -- 模板 B：EPS 收益率修正（主信号 analyst4：est_eps；close 为 pv1 价格基准）
@@ -224,6 +226,19 @@ group_rank(ts_rank(free_cash_flow_reported_value / equity, 126), industry)
 -- 模板 F：资产周转 × 利润率（主信号 fundamental6：operating_income, sales, assets）
 rank(ts_rank(operating_income / sales * sales / assets, 126))
 ```
+
+**实测基线（2026-10-29，顾问账号 USA TOP3000 D1，各跑 1 次真实仿真）**
+
+| 模板 | alpha_id | Sharpe | Fitness | TO | 过顾问门槛 1.58 / 1.0 |
+|---|---|---:|---:|---:|:---:|
+| A · ROE 趋势 | npvblvPq | 1.23 | 0.58 | 6.1% | ✗ |
+| B · EPS 收益率 | qMLZpJ6K | **1.57** | 1.10 | 11.2% | ✗（差 0.01） |
+| C · FCF 收益率 | JjeLJEaW | 1.08 | 0.59 | 4.3% | ✗ |
+| D · 多因子混合 | d5WwrmP2 | 1.64 | 1.02 | 6.6% | ✓ |
+| E · 反转 + 质量 | omEe0Gdl | **1.81** | **1.24** | 11.3% | ✓ |
+| F · 周转 × 利润率 | Xg9EA3Y0 | 1.08 | 0.50 | 6.9% | ✗ |
+
+两条可直接用的推论：① **双腿正交混合（D/E）的达标率显著高于单腿（A/B/C/F 全灭）**，在顾问门槛下混合应作为默认姿势而非进阶技巧；② **接近门槛时（B 差 0.01）先做参数邻域搜索，比新造模板的期望收益高得多**——新造模板首跑达标率 2/6，而 B 只需 decay / neutralization / window 微调。
 
 ### 4.2 推荐默认设置
 
@@ -943,3 +958,15 @@ USA TOP3000 delay=1 实证结论：
 
 - `CLUSTER_TEST` 目前返回 `ERROR`（平台侧无数据），不影响提交但也不提供信息。
 - 日收益相关仍是 proxy；`SELF_CORRELATION` 用信号级相关，护栏 2（信号成分重叠）不可省。
+
+### 2026-10-29 — 内置模板 A–F 首次全量实测（顾问账号 USA TOP3000 D1）
+
+依据：用 `scripts/wq_api.py` 对 §4.1.2 的六个内置模板各跑 1 次真实仿真，共消耗日额度 6 次（5000 的 0.12%）。完整数据见 §4.1.2 下的「实测基线」表。
+
+1. **「通过率最高」是失真表述，已修正**：模板 A 实测 Sharpe 1.23 / Fitness 0.58，离顾问门槛 1.58 / 1.0 很远。该注脚的真实含义是「最不容易报错、最容易跑出结果」，与「能过门槛」是两个口径。凡把模板 A 当作高质量样本复用的场合（如 few-shot 示例、默认起点），都会把生成质量锚定在 1.2 量级。
+2. **单腿全灭、双腿全过**：A/B/C/F（单信号）4 条全部未过；D/E（两条正交腿相加）2 条全过且分数最高（1.64 / 1.81）。样本仅 6 条不足以称规律，但机制成立——正交腿相加降波动、抬信息比。**在顾问门槛下，双腿混合应作为默认姿势。**
+3. **B 差 0.01**（1.57 vs 1.58，Fitness 1.10 已过线），且 TO 11.2% 距上限 70% 有大量余量。这类「贴线」实例的正确处置是**参数邻域搜索**（decay / neutralization / window / truncation），不是换结构。新造模板首跑达标率实测 2/6，邻域搜索的先验成功率显著更高，成本还更低。
+4. **未提交 alpha 上 `SELF_CORRELATION` 恒为 `PENDING`**，平台不计算。因此「模板是否值得进 few-shot」在物理上不可能依赖相关性——相关性只在提交动作后才被评估，且它是 **alpha 级**属性而非**模板级**（同一骨架换字段即可绕过）。判定「模板质量」时应显式排除 `SELF_CORRELATION` / `PROD_CORRELATION`。
+5. **IS checks 的实际返回集合比 `BLOCKING_CHECKS` 白名单更大**：实测出现 `CLUSTER_TEST`、`OSMOSIS_ALLOCATION`、`MATCHES_THEMES`、`MATCHES_PYRAMID`，均不在旧白名单内。用白名单做「是否达标」判定的实现会静默放行这些项的 FAIL。**正确做法：除相关性两项外，任何 `FAIL`/`ERROR` 都阻断；`WARNING` 不阻断但必须记录**（A 的 `CLUSTER_TEST` 实测为 WARNING，value 1.45 / limit 1.58）。
+6. **`CLUSTER_TEST` 在未提交 alpha 上也会给出数值**（本次 A 为 1.45，limit 1.58）。它是「与同簇 alpha 的相似度」的早期信号，可作为提交前低相关的辅助判据，但目前未纳入任何门禁。
+
