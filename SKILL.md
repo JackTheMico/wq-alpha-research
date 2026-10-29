@@ -1,6 +1,6 @@
 ---
 name: wq-alpha-research
-description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expressions, selecting fields/operators, diagnosing simulation and IS check failures, tuning Sharpe/Fitness/Turnover, submitting alphas, and building low-correlation alpha portfolios. Also use for 中文 requests about WorldQuant、BRAIN、WQ Alpha、因子表达式、回测、提交、换手、Fitness、Sharpe."
+description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expressions, selecting fields/operators, diagnosing simulation and IS check failures, tuning Sharpe/Fitness/Turnover, submitting alphas, and building low-correlation alpha portfolios. Covers the BRAIN HTTP API (auth, multi-simulation, rate limits, recordsets), consultant-tier submission thresholds, and the self-evolution loop. Also use for 中文 requests about WorldQuant、BRAIN、WQ Alpha、顾问权限、因子表达式、回测、提交、换手、Fitness、Sharpe。"
 ---
 
 # WQ Alpha 研究 Skill
@@ -16,7 +16,8 @@ description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expres
   ├── 拉取所有 alpha 列表 ──→ 只看 ACTIVE；算 **日收益** 相关，>0.7 则修改或放弃
   ├── 设计新因子
   │    ├── 字段已验证？ ──否──→ 查第 2 节（本地字段文件搜索 / 模拟 rank(field)）
-  │    └── 是
+  │    └── 是 ──→ 若套模板，先过 4.1.1 数据集一致性门槛
+  │               （模板信号字段与用户字段同一 dataset，否则混信号 → 停止执行）
   │         ├── 基本面 ──→ group_rank + ts_rank, SUBINDUSTRY, decay=0
   │         ├── 分析师 ──→ group_rank + ts_rank, INDUSTRY/SUBINDUSTRY, decay=0–4
   │         ├── 技术 ────→ 高 decay(10–30) 或混合基本面降低换手
@@ -127,24 +128,100 @@ resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
 
 ### 4.1 高胜率模板
 
+#### 4.1.1 数据集一致性硬门槛（套模板前强制，先于一切构造）
+
+**规则**：用户给定字段后，所选模板的**主信号字段**必须与用户字段属于**同一 dataset**（以本地字段快照或 `GET /data-fields/{id}` 为准）。不一致 → 判定**混信号** → **立即停止执行**（不模拟、不提交），向用户报告冲突字段清单，等待用户换字段或换模板。**不允许**以"权重调低""只当过滤项"等理由放行。
+
+判定要点：
+
+1. **主信号字段 vs 基准字段**：门槛只约束主信号字段（承载 alpha 逻辑的字段）。仅作分母/分组/市值分桶的基准字段（如 `close`、`equity`、`cap`）不单独触发混信号；但只要模板主信号字段与用户字段不同源，就是混信号，停止。
+2. **本地快照查不到的字段**（如 mdl77 系列）：先用 `GET /data-fields/{id}` 精确查询 dataset 再判定（search 端点对短词会返回 400，见第 12 节 2026-08-16）；API 也查不到 → 字段本身无效，停止。
+3. **模板 D/E 是跨数据集混合模板**，与任何用户给定的单一字段都无法满足同源要求，**禁止**用于套用用户字段；仅当用户明确要求构造混合因子时才可参考其结构。
+
+模板字段 dataset 实测对照（2026-09-01，本地快照）：
+
+| 字段 | dataset | 常见角色 |
+|------|---------|----------|
+| operating_income / sales / assets / cashflow_op | fundamental6 | 信号 |
+| equity | fundamental6 | 信号 / 规模基准 |
+| est_eps / free_cash_flow_reported_value | analyst4 | 信号 |
+| close / open / cap | pv1 | 价格 / 市值基准 |
+
+校验代码（套模板前必跑）：
+
+```python
+import json
+from pathlib import Path
+
+API_BASE = "https://api.worldquantbrain.com"
+# 按实际部署位置调整；skill 目录内为相对 references/ 路径
+FIELDS_JSON = Path("/path/to/wq-alpha-research/references/wq_usa_top3000_delay1_data_fields.json")
+
+def load_field_datasets():
+    data = json.loads(FIELDS_JSON.read_text(encoding="utf-8"))
+    return {f["id"]: (f.get("dataset") or {}).get("id") for f in data}
+
+def dataset_of(fid, known, session=None):
+    d = known.get(fid)
+    if d is None and session is not None:   # 本地快照没有 → API 精确查询
+        r = session.get(f"{API_BASE}/data-fields/{fid}")
+        if r.status_code == 200:
+            d = (r.json().get("dataset") or {}).get("id")
+    return d
+
+def check_dataset_gate(user_field, template_signal_fields, session=None):
+    """模板主信号字段与用户字段必须同一 dataset。
+    返回 (ok, msgs)。ok=False → 混信号，必须停止执行（不模拟、不提交）。"""
+    known = load_field_datasets()
+    ud = dataset_of(user_field, known, session)
+    if ud is None:
+        return False, [f"用户字段 {user_field} 的 dataset 未知（本地快照与 API 均无），先按 2.3 验证字段"]
+    msgs, bad = [f"用户字段 {user_field} → dataset={ud}"], []
+    for f in template_signal_fields:
+        d = dataset_of(f, known, session)
+        if d != ud:
+            bad.append(f"{f}({d})")
+    if bad:
+        return False, msgs + [f"混信号：模板信号字段 {', '.join(bad)} 与用户字段不同源 → 停止执行"]
+    return True, msgs + [f"模板信号字段与用户字段同属 {ud} → 可继续"]
+
+# 用法示例：用户给了 mdl77 字段（Analysts' Factor Model），想套模板 A（fundamental6）→ 拦截
+ok, msgs = check_dataset_gate("mdl77_2gdna_actrtn12m", ["operating_income", "equity"])
+print("\n".join(msgs))
+if not ok:
+    raise SystemExit("⚠️ 混信号：不模拟、不提交，请换同 dataset 模板或换字段")
+```
+
+判定表：
+
+| 校验结果 | 动作 |
+|----------|------|
+| 信号字段与用户字段同 dataset | ✅ 继续套模板、进入回测 |
+| 任一信号字段 dataset 不同 | ❌ 混信号：停止执行，报告冲突字段，等用户决策 |
+| 用户字段 dataset 未知（快照 + API 均无） | ❌ 停止：先验证字段（2.3 / API 精确查询） |
+
+#### 4.1.2 模板库（已标注 dataset）
+
 ```fastexpr
--- 模板 A：ROE 趋势（通过率最高）
+-- 模板 A：ROE 趋势（通过率最高；主信号 fundamental6：operating_income, equity）
 group_rank(ts_rank(operating_income / equity, 126), subindustry)
 
--- 模板 B：EPS 收益率修正
+-- 模板 B：EPS 收益率修正（主信号 analyst4：est_eps；close 为 pv1 价格基准）
 group_rank(ts_rank(est_eps / close, 126), industry)
 
--- 模板 C：FCF 收益率
+-- 模板 C：FCF 收益率（主信号 analyst4：free_cash_flow_reported_value；equity 为规模基准）
 group_rank(ts_rank(free_cash_flow_reported_value / equity, 126), industry)
 
--- 模板 D：多因子混合（高 Fitness）
+-- 模板 D：多因子混合（高 Fitness）【跨数据集：fundamental6 + analyst4】
+-- ⚠️ 混合模板：不得用于套用用户给定的单一字段（必触发 4.1.1 混信号门槛）
 0.5 * group_rank(ts_rank(operating_income / equity, 126), subindustry)
 + 0.5 * group_rank(ts_rank(est_eps / close, 126), industry)
 
--- 模板 E：低相关技术+基本面混合
+-- 模板 E：低相关技术+基本面混合【跨数据集：pv1 + fundamental6】
+-- ⚠️ 混合模板：同上，不得用于套用用户字段
 0.5 * rank(-(close / open - 1)) + 0.5 * rank(ts_rank(operating_income / equity, 126))
 
--- 模板 F：资产周转 × 利润率
+-- 模板 F：资产周转 × 利润率（主信号 fundamental6：operating_income, sales, assets）
 rank(ts_rank(operating_income / sales * sales / assets, 126))
 ```
 
@@ -166,25 +243,71 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 
 | 指标 | 公式/含义 | 目标 |
 |------|-----------|------|
-| Sharpe | 日 IR × √252 | ≥ 1.5（最低 1.25） |
-| Fitness | Sharpe × √(|Returns| / max(TO, 0.125)) | ≥ 1.1（最低 1.0） |
+| Sharpe | 日 IR × √252 | 见 5.1.1 阈值表 |
+| Fitness | Sharpe × √(|Returns| / max(TO, 0.125)) | 见 5.1.1 阈值表 |
 | Returns | 年化收益 / $10M | ≥ 7% |
-| Turnover | 日交易额 / Book Size | 1%–20% |
+| Turnover | 日交易额 / Book Size | 1%–70% |
 | Drawdown | 峰值到谷值最大回撤 | < 15% |
 | Margin | PnL / 总交易额 | 越高越好 |
 
-### 5.2 IS 检查清单
+### 5.1.1 提交阈值：顾问账号 vs 普通账号（易踩坑）
+
+**顾问账号（CONSULTANT 权限）的提交门槛明显更高，与普通账号不同。** 判定以 `GET /alphas/{id}` 的 `is.checks[].limit` 为**权威值**，不要凭记忆写死。
+
+| 指标 | 顾问 D1 | 顾问 D0 | 普通账号（参考） |
+|------|---------|---------|------------------|
+| Sharpe | **> 1.58** | **> 2.69** | > 1.25 |
+| Fitness | **> 1.0** | **> 1.5** | > 1.0 |
+| Turnover | 1%–70% | 1%–70% | 1%–70% |
+| Max weight | 单股 < 10%（OS 阶段 USA < 8%） | 同左 | 单股 < 10% |
+
+区域特例：
+
+| 区域 | 追加门槛 |
+|------|----------|
+| CHN | D1: Sharpe ≥ 2.08, Returns ≥ 8%, Fitness ≥ 1.0；D0: Sharpe ≥ 3.5, Returns ≥ 12%, Fitness ≥ 1.5；且 Robust universe 需保留 ≥ 40% 的收益与 Sharpe |
+| ASI | Robust Universe 需保留 ≥ 90% 收益与 Sharpe；MaxTrade 必须 ON |
+| ASI/JPN/HKG/TWN/KOR | Investability Sharpe：`maxtrade=ON`，或 `investability Sharpe > 原 Sharpe × 0.7` |
+| SuperAlpha | 门槛同 alpha，但 turnover 改为 **2% ≤ TO < 40%** |
+
+> 代码里用 `BrainSession.thresholds(delay)` 取阈值，它按账号权限自动在
+> `CONSULTANT_THRESHOLDS` / `STANDARD_THRESHOLDS` 之间切换。
+
+### 5.2 IS 检查清单（真实 check 名称，2026-09 顾问面板实测）
 
 | 检查项 | 阈值 | 失败原因 | 修复方法 |
 |--------|------|----------|----------|
-| LOW_SHARPE | ≥ 1.25 | 信号弱 | 换字段/窗口/加 group_rank |
-| LOW_FITNESS | ≥ 1.0 | 换手过高 | 增大 decay、混合稳定信号 |
+| LOW_SHARPE | 见 5.1.1 | 信号弱 | 换字段/窗口/加 group_rank |
+| LOW_FITNESS | 见 5.1.1 | 换手过高 | 增大 decay、混合稳定信号 |
 | LOW_TURNOVER | ≥ 1% | 信号太稳定 | 缩短窗口、换更活跃字段 |
 | HIGH_TURNOVER | ≤ 70% | 换手爆炸 | 增大 decay、trade_when、混合 |
 | CONCENTRATED_WEIGHT | 单股 < 10% 且分散 | 权重集中 | 用 rank()、降低 truncation、ts_backfill |
-| LOW_SUB_UNIVERSE_SHARPE | TOP1000 也有效 | 小票依赖 | 用基本面、SUBINDUSTRY、避免市值倾斜 |
-| SELF_CORRELATION | **信号级** 相关系数 < 0.7，且新 Sharpe ≥ 冲突因子 × 1.1 | 与已上线因子太像（同信号簇） | 换信号簇/换数据来源；**不要只调参数或换窗口**。注意：此检查用信号级相关（≈0.9+），日收益相关只是 proxy 会低估，详见 7.2/7.5 |
-| MATCHES_COMPETITION | 信息性 | — | 无影响 |
+| LOW_SUB_UNIVERSE_SHARPE | TOPXXX：`subU_Sharpe ≥ 0.75·√(size_ratio)·Sharpe` | 小票依赖 | 用基本面、SUBINDUSTRY、避免市值倾斜 |
+| **IS_LADDER_SHARPE** | 分年阶梯（D1 FAIL 1.59；见 5.2.1） | 近年 Sharpe 衰减 | 提高近年表现；TO<30% 时 PASS 阈值×0.85 |
+| **LOW_2Y_SHARPE** | 近 2 年 Sharpe ≥ 1.58（D1） | 近年失效 | 同上 |
+| **SELF_CORRELATION** | 0.7（信号级） | 与已提交 alpha 太像 | 换信号簇/换数据源；不要只调参数 |
+| **PROD_CORRELATION** | 0.7（对 PROD 池） | 与生产池太像 | 同上；顾问独有 |
+| DATA_DIVERSITY | 信息性/受限 | 数据源单一 | 引入新 dataset |
+| OLD_SIMULATION | — | 仿真过旧 | **重新模拟**后再提交 |
+| CLUSTER_TEST | Sharpe ≥ 1.58（KOR/JPS/TWN/HKG/IND/GBR/DEU ≥ 1） | 仅分类，不阻断 | 无影响（`ERROR` 也不阻断） |
+| MATCHES_PYRAMID / MATCHES_THEMES | multiplier | 仅加分项 | 无影响 |
+| OSMOSIS_ALLOCATION | — | 仅 WARNING | 无影响 |
+
+#### 5.2.1 IS Sharpe Ladder（D1）
+
+先看全历史 Sharpe 是否 ≥ FAIL 阈值；再从最近 2 年起逐年扩容比较：
+
+| 年数 | D1 FAIL | D1 PASS | D0 FAIL | D0 PASS |
+|------|---------|---------|---------|---------|
+| 全历史 | 1.59 | — | 2.69 | — |
+| 2–5 年 | 1.59 | 2.38 | 2.69 | 3.96 |
+| 6 年 | 1.59 | 2.22 | 2.69 | 3.64 |
+| 7 年 | 1.59 | 2.06 | 2.69 | 3.33 |
+| 8 年 | 1.59 | 1.90 | 2.69 | 3.17 |
+| 9 年 | 1.59 | 1.74 | 2.69 | 2.85 |
+| 10 年 | 1.59 | 1.59 | 2.69 | 2.69 |
+
+> **TO < 30% 时 PASS 阈值 × 0.85**（FAIL 阈值不打折）——这是低换手因子的隐性红利。
 
 ### 5.3 失败统计
 
@@ -216,44 +339,49 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 
 ## 7. BRAIN API 自动化
 
-### 7.1 认证（请填写账号）
+> 本节已按 **2026-09-21** 版官方文档（`/learn/documentation/consultant-information/brain-api`）与顾问账号实测行为重写。
+> 可执行实现集中在 `scripts/wq_api.py`，下列代码即其用法的精简说明；**优先直接 import，不要在各脚本里重抄一遍**。
 
-**使用前必须准备凭据**。推荐使用环境变量；也可以在本地放置未跟踪的 `credential.txt`（已被 `.gitignore` 忽略），内容为 JSON 数组：
+### 7.0 只保留一套实现：`scripts/wq_api.py`
 
-```json
-["your_username", "your_password"]
-```
-
-⚠️ **提醒**：不要把真实账号密码写入仓库。优先使用 `WQ_BRAIN_USERNAME` / `WQ_BRAIN_PASSWORD` 环境变量。
+| 能力 | 旧做法（已废弃） | 现状 |
+|------|------------------|------|
+| 轮询等待 | 固定 `sleep(8)` + 最多 90 次 | 按响应头 `Retry-After` 驱动 |
+| 终态判断 | 只认 `COMPLETE` / `ERROR` / `FAILED` | `WAITING`/`SIMULATING`/`COMPLETE`/`WARNING`/`CANCELLED`/`ERROR`/`TIMEOUT`/`FAIL`；`WARNING` 也带 alpha |
+| 批量仿真 | 逐个 POST 串行 | 数组 POST（2..10 个）+ 父任务 `children` |
+| 额度控制 | 无 | 解析 `X-Ratelimit-Limit/Remaining/Reset` |
+| 重复仿真 | 无 | `SimulationCache`（payload sha256 去重，JSONL 落盘） |
+| 拉 alpha 列表 | 拉全量 500+ 再本地筛 | 服务端 `?status=ACTIVE` 过滤 |
+| PnL 对齐 | 要求两条序列等长 | 按**日期交集**对齐后算相关 |
+| 提交确认 | 只看 201 | 轮询至 `ACTIVE`，并单独判 `SELF_CORRELATION`/`PROD_CORRELATION` |
 
 ```python
-import json
-import requests
-from requests.auth import HTTPBasicAuth
+import sys; sys.path.insert(0, "scripts")
+from wq_api import BrainSession, SimulationCache, build_payload, print_row, simulate_one, submit_verified
 
-API_BASE = "https://api.worldquantbrain.com"
-
-# 1. 读取 credential.txt
-import os
-
-username = os.getenv("WQ_BRAIN_USERNAME")
-password = os.getenv("WQ_BRAIN_PASSWORD")
-if not (username and password):
-    with open("credential.txt") as f:
-        username, password = json.load(f)
-
-# 2. 创建会话并认证
-session = requests.Session()
-session.auth = HTTPBasicAuth(username, password)
-session.headers.update({
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-})
-
-resp = session.post(f"{API_BASE}/authentication")
-assert resp.status_code == 201, f"认证失败: {resp.status_code} {resp.text}"
-print("认证成功")
+brain = BrainSession()          # WQ_BRAIN_USERNAME/PASSWORD 或 credential.txt
+brain.authenticate()
+print(brain.user_id, brain.permissions, brain.thresholds(1))
 ```
+
+### 7.1 认证与权限
+
+`POST /authentication`（Basic Auth）→ 201，返回 JWT（cookie `t`，默认 4 小时）与 `permissions`。**先读 permissions 再决定能做什么**：
+
+| 权限 | 含义 |
+|------|------|
+| `CONSULTANT` | 顾问：更高提交门槛 + PROD_CORRELATION + BRAIN Labs + 欧元/亚洲市场 |
+| `MULTI_SIMULATION` | 可一次 POST 数组跑 2..10 个仿真 |
+| `QUICK_MODE` | 可用 `simulationMode: "QUICK"` 快速粗略回测 |
+| `REGION_AGNOSTIC` / `PROD_ALPHAS` / `VISUALIZATION` / `BRAIN_LABS` | 区域无限制 / 生产池 / 可视化 / Labs |
+
+要点：
+
+- `GET /authentication` 可查当前状态：未登录 `204`，已登录 `200` 带 `user.id`/`token.expiry`。
+- `POST` 可带 `{"expiry": <1..14400>}` 指定有效期；反复失败会要求 `recaptcha`（400/401 带 `recaptcha` 字段）。
+- 启用生物识别的账号会返回 `401` + `WWW-Authenticate: persona` + `Location`，需在浏览器完成认证后再 POST 该 `Location`。
+- `DELETE /authentication` 注销并作废 JWT。
+- 建议会话级复用 cookie；`BrainSession` 在 401 时会自动重认证一次。
 
 ### 7.2 获取已提交 Alpha 并计算相关性（双层护栏）
 
@@ -413,180 +541,182 @@ for alpha in active:
 
 **实战教训（2026-08-30）**：纯信号版 `F3 = group_rank(ts_rank(raw, 60), subindustry)`（S=1.81）与已上线 `M3 = 0.6*sg + 0.4*OI`（sg 同信号，S=2.56）日收益相关仅 0.465（看似安全），但信号成分重叠 → 提交后 SELF_CORRELATION **FAIL 0.9313**（>0.7 且 Sharpe 未高 10%），被拒。加护栏 2 后复跑即拦下 `候选信号⊂已上线 gJjLJvlm`。
 
-### 7.3 回测
+### 7.3 仿真提交（settings 权威字段）
+
+`POST /simulations` → `201` + `Location: /simulations/<id>`。字段以 `OPTIONS /simulations` 的实时 schema 为准（**这是最可靠的字段清单，优先于任何文档快照**）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `type` | choice | ✓ | `REGULAR` / `REGION_AGNOSTIC` |
+| `settings.instrumentType` | choice | ✓ | 目前仅 `EQUITY` |
+| `settings.region` | choice | ✓ | `USA` `GLB` `EUR` `ASI` `CHN` `KOR` `HKG` `AMR` `IND` `DEU` `GBR` `ALL` |
+| `settings.universe` | choice | ✓ | `TOP3000` `TOP1000` `TOP500` `TOPSP500` `TOPDIV3000` `MINVOL1M` `MINVOL10M` `ILLIQUID_MINVOL1M` 等 |
+| `settings.delay` | choice | ✓ | `0` / `1` |
+| `settings.decay` | int | ✓ | `0..512` |
+| `settings.neutralization` | choice | ✓ | `NONE` `MARKET` `SECTOR` `INDUSTRY` `SUBINDUSTRY` `COUNTRY` + 风险类 `SLOW` `FAST` `SLOW_AND_FAST` `CROWDING` `REVERSION_AND_MOMENTUM` `STATISTICAL` |
+| `settings.truncation` | float | ✓ | `0..1`（常用 0.05–0.08） |
+| `settings.pasteurization` | choice | ✓ | `ON` / `OFF` |
+| `settings.unitHandling` | choice | ✓ | `VERIFY` |
+| `settings.nanHandling` | choice | ✓ | `ON` / `OFF`（默认 OFF） |
+| `settings.language` | choice | ✓ | `FASTEXPR` / `PYTHON` |
+| `settings.visualization` | bool | ✓ | 一般 `False`（开则更慢） |
+| `settings.lookback` | int | | `0..1024` |
+| `settings.maxTrade` | choice | | `ON`/`OFF`；ASI/JPN/HKG/KOR/TW 必须 `ON` |
+| `settings.maxPosition` | choice | | `ON`/`OFF`；USA/ASI/EUR 建议 `ON` 提升容量真实性 |
+| `settings.testPeriod` | string | | `P0Y0M0D` … `P6Y0M0D`，把 IS 尾部划为测试段 |
+| `settings.simulationMode` | choice | | `FULL`（默认）/ `QUICK` |
 
 ```python
-payload = {
-    "type": "REGULAR",
-    "settings": {
-        "instrumentType": "EQUITY", "region": "USA", "universe": "TOP3000",
-        "delay": 1, "decay": 0, "neutralization": "SUBINDUSTRY",
-        "truncation": 0.08, "pasteurization": "ON", "unitHandling": "VERIFY",
-        "nanHandling": "ON", "language": "FASTEXPR", "visualization": False,
-    },
-    "regular": "group_rank(ts_rank(operating_income/equity, 126), subindustry)",
-}
-resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
-sim_id = resp.headers["Location"].rstrip("/").split("/")[-1]
-
-while True:
-    data = session.get(f"https://api.worldquantbrain.com/simulations/{sim_id}").json()
-    if data.get("status") == "COMPLETE":
-        alpha_id = data["alpha"]
-        break
-    time.sleep(8)
-
-alpha = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
+from wq_api import build_payload, simulate_one
+row = simulate_one(brain, "group_rank(ts_rank(operating_income/equity,126),subindustry)",
+                   neutralization="SUBINDUSTRY", decay=0)
+print_row(row)          # Sharpe / Fitness / TO / Ret / DD + 本地门槛判定
 ```
 
-### 7.4 提交与监控
+`simulate_one` 内部走 `brain.run()`：提交 → 按 `Retry-After` 轮询 → 取 `alpha` 字段 → 拉指标与 checks。
+
+### 7.4 多仿真（MULTI_SIMULATION）
+
+顾问可同时跑 **最多 8 个多仿真**，每个含 **最多 10 个 alpha**（批内串行）。API 直接 POST 数组：
 
 ```python
-# 提交
-sub = session.post(f"https://api.worldquantbrain.com/alphas/{alpha_id}/submit")
-print(sub.status_code)  # 201 成功
-
-# 监控 SELF_CORRELATION（提交后检查才从 PENDING 跑出结果；value 字段常缺，须从 message 回退解析）
-import re
-
-def self_corr(session, alpha_id):
-    a = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
-    sc = next((c for c in a.get("is", {}).get("checks", []) if c["name"] == "SELF_CORRELATION"), {})
-    result, value, msg = sc.get("result"), sc.get("value"), ""
-    for fld in ("message", "description", "detail"):
-        if sc.get(fld):
-            msg = str(sc[fld]); break
-    if value is None and msg:
-        m = re.search(r"([0-9]+\.[0-9]+)", msg)
-        if m:
-            value = float(m.group(1))
-    return result, value, msg
-
-for _ in range(60):   # 最多 ~10 分钟；必须等到离开 PENDING，否则只看得到 None
-    result, value, msg = self_corr(session, alpha_id)
-    print(f"t+{_*10}s SELF_CORR={result} value={value} {msg}")
-    if result in ("PASS", "FAIL"):
-        break
-    time.sleep(10)
-# result=FAIL 时 value 即信号级相关系数（如 0.9313），msg 含 'above cutoff of 0.7' 与 Sharpe 比较结论
+resp = brain.request("POST", "/simulations", json=[payload_a, payload_b])
+parent_id = resp.headers["Location"].rstrip("/").split("/")[-1]
+parent = brain.wait(parent_id)          # 父任务完成后 children 才有子仿真 id
+for child_id in parent.children:
+    print(brain.wait(child_id))
 ```
 
-### 7.5 自动提交模板
+约束（违反即 400 或资源错误）：
+
+1. 一批 2..10 个；**同批内 `type`/`instrumentType`/`region`/`delay`/`language` 必须一致**（`BrainSession.simulate_multi` 会前置校验）。
+2. 报 `The simulation requires more resources than are available` 时，减小批内数量重试。
+3. 每个子仿真都会计入当日额度——多仿真不省额度，只省你等的时间。
+
+`brain.run_many(payloads, batch_size=8)` 已封装切片与串行，直接用即可。
+
+### 7.5 每日额度与限流
+
+`POST /simulations` 的响应头给出额度：
+
+```
+X-Ratelimit-Limit: 5000        # 当日总上限
+X-Ratelimit-Remaining: 4998    # 当日剩余
+X-Ratelimit-Reset: 3393        # 距离重置的秒数
+```
+
+实测（顾问账号，2026-10）：`limit=5000`。注意：
+
+- **所有成功仿真都计数**，包括多仿真里的子仿真、以及"重新模拟已存在的 alpha"。
+- 同一表达在不同日期重跑也计数，但 alpha 只出现在首次模拟那天 → 别用 Alphas 页面的 Today 计数估算额度。
+- 额度耗尽后要等到次日（EST 时区）重置。脚本里用 `brain.remaining_simulations` 做前置守卫。
+- `429` 读 `Retry-After` 退避；`BrainSession.request` 已内置 3 次重试。
+
+### 7.6 记录集（recordsets）
+
+```
+GET /alphas/<id>/recordsets            # 列出可用记录集
+GET /alphas/<id>/recordsets/<name>     # 取具体记录集
+```
+
+可用名称：`pnl` `daily-pnl` `sharpe` `turnover` `yearly-stats` `coverage` `coverage-by-industry` `coverage-by-sector` `average-size-by-*` `pnl-by-*` `sharpe-by-*` `average-value-by-*`。
+
+返回是压缩表：`schema.properties[].name/type` + `records` 二维数组，**列顺序要与 properties 对齐**。`type` 影响显示格式：`amount`（千/百万/十亿）、`percent`、`permyriad`（万分比）、`date`、`datetime`。
+
+**未就绪时返回 `Retry-After`**，必须等（旧代码只看 200 会拿到空 body）。直接用 `brain.pnl_series(alpha_id)` → `[(date, value)]`。
+
+### 7.7 提交与二次确认
 
 ```python
-import numpy as np
-
-def simulate_and_submit(expression, settings, existing=None, cand_expr=None):
-    """
-    existing: {alpha_id: {"pnl": [(date,val)...], "expr": "...", "sharpe": x}}，已上线因子元数据。
-    cand_expr: 候选表达式字符串（信号成分重叠护栏用；缺省回退用 expression）。
-    返回: {"alpha_id": ..., "decision": "submitted|skip|high_corr|signal_overlap|verify_failed", ...}
-    """
-    payload = {"type": "REGULAR", "settings": settings, "regular": expression}
-    resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
-    if resp.status_code != 201:
-        return {"error": "simulate_failed"}
-    sim_id = resp.headers["Location"].rstrip("/").split("/")[-1]
-    while True:
-        data = session.get(f"https://api.worldquantbrain.com/simulations/{sim_id}").json()
-        if data.get("status") == "COMPLETE":
-            alpha_id = data["alpha"]
-            break
-        if data.get("status") in ("ERROR", "FAILED"):
-            return {"error": "simulation_error"}
-        time.sleep(8)
-    alpha = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
-    is_ = alpha.get("is", {})
-
-    # 1. 基础指标过滤
-    if is_.get("fitness", 0) < 1.1 or is_.get("sharpe", 0) < 1.3 or is_.get("turnover", 1) > 0.20:
-        return {"alpha_id": alpha_id, "decision": "skip", "reason": "metrics", "metrics": is_}
-
-    # 2. 护栏 2：信号成分重叠（关键，只比表达式、不拉 PnL）
-    cexpr = cand_expr or expression
-    if existing:
-        active_exprs = {oid: m.get("expr", "") for oid, m in existing.items()}
-        ov = signal_overlap(cexpr, active_exprs)
-        if ov:
-            return {"alpha_id": alpha_id, "decision": "signal_overlap",
-                    "overlap_with": ov, "reason": "信号级相关≈0.9，SELF_CORRELATION 将 FAIL"}
-
-    # 3. 护栏 1：日收益相关（proxy，按日期对齐；豁免：新 Sharpe ≥ 冲突因子 × 1.1）
-    if existing:
-        new_ret = to_returns(fetch_pnl(session, alpha_id))
-        for old_id, m in existing.items():
-            old_ret = to_returns(m.get("pnl", []))
-            c = aligned_corr(new_ret, old_ret)
-            if c is not None and abs(c) >= 0.7:
-                old_sharpe = m.get("sharpe")
-                if old_sharpe is None or is_.get("sharpe", 0) < old_sharpe * 1.1:
-                    return {"alpha_id": alpha_id, "decision": "high_corr",
-                            "corr_with": old_id, "corr": c}
-
-    # 4. 提交（201 只表示请求被接受，≠ 已上线）
-    sub = session.post(f"https://api.worldquantbrain.com/alphas/{alpha_id}/submit")
-    if sub.status_code not in (200, 201):
-        return {"alpha_id": alpha_id, "decision": "submit_failed", "status": sub.status_code}
-
-    # 5. 验证是否真正上线（BRAIN 可能因 SELF_CORRELATION 保持 UNSUBMITTED；提交被限频也会停在 UNSUBMITTED）
-    for _ in range(20):
-        time.sleep(10)
-        alpha = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json()
-        if alpha.get("status") == "ACTIVE":
-            return {"alpha_id": alpha_id, "decision": "submitted", "status": "ACTIVE"}
-        result, value, msg = self_corr(session, alpha_id)
-        if result == "FAIL":
-            return {"alpha_id": alpha_id, "decision": "self_correlation_fail",
-                    "self_corr": value, "msg": msg, "status": alpha.get("status")}
-    st = session.get(f"https://api.worldquantbrain.com/alphas/{alpha_id}").json().get("status")
-    return {"alpha_id": alpha_id, "decision": "verify_failed", "status": st}
+outcome = submit_verified(brain, alpha_id)
+# "ACTIVE" | "SELF_CORRELATION_FAIL(value=...)" | "PROD_CORRELATION_FAIL(...)" | "still_UNSUBMITTED"
 ```
 
-### 7.6 限流
+- `POST /alphas/<id>/submit` 返回 **201 只表示请求被接受**，不是上线。
+- 必须轮询到 `status == "ACTIVE"`；`UNSUBMITTED` 通常意味着相关性检查没过或仍在审核。
+- `OLD_SIMULATION = FAIL` 时，说明该 alpha 的仿真太旧，**需重新模拟**再提交，而不是重试 submit。
 
-- 模拟/提交间 sleep 2–5 秒。
-- 遇 429 读取 `Retry-After`，指数退避。
-- 批量建议单线程或 ≤ 2 并发。
+#### 7.7.1 相关性数值的两个位置（读错就会以为"平台不暴露"）
 
-### 7.7 提交后验证（201 ≠ 已上线）
+`SELF_CORRELATION` 在 alpha 生命周期里**换了位置**，只认一处必然读空：
 
-`POST /alphas/{id}/submit` 返回 201 只表示请求被接受，**不代表 alpha 已变为 ACTIVE**。实战中常见：
-
-- alpha 状态仍为 `UNSUBMITTED`（SELF_CORRELATION 未通过或审核中）。
-- 同一信号换参数生成的新 alpha被系统判定为重复，无法真正提交。
-
-**必须二次确认**：
+| alpha 状态 | 数值位置 | 说明 |
+|------------|----------|------|
+| 刚模拟 / `UNSUBMITTED` | `is.checks[]` 中 `name == "SELF_CORRELATION"`，`result` 常为 `PENDING` | 未提交，相关性尚未计算 |
+| 已提交 / `ACTIVE` | `is.selfCorrelation`（float），**checks 里没有该项** | 例如 `0.8166` |
+| 生产池相关（顾问） | `is.prodCorrelation`（float） | 未提交时为 `0.0` |
 
 ```python
-alpha = session.get(f"{API_BASE}/alphas/{alpha_id}").json()
-print(alpha.get("status"))  # ACTIVE 才算真正提交成功
-
-# 如果 status == UNSUBMITTED，查看 checks 中 SELF_CORRELATION 结果
-for c in alpha.get("is", {}).get("checks", []):
-    print(c["name"], c.get("result"), c.get("value"))
+brain.self_correlation(alpha)   # 两个位置都读，返回 float 或 None
+brain.prod_correlation(alpha)
 ```
 
-**获取全部 alpha 并统计 ACTIVE 数量**：
+> 旧笔记曾断言"`is.checks` 里永远找不到 SELF_CORRELATION"——那只是 ACTIVE alpha 的表现；`UNSUBMITTED` alpha 的 checks 里确实有这一项（`PENDING`）。**两处都要读**才是完整结论。
+
+另注：`is.selfCorrelation > 0.7` 的 alpha 仍可能是 ACTIVE（豁免条件：新 Sharpe ≥ 冲突因子 × 1.1），所以它只用于判断"是否需要换信号簇"，不能当提交的硬否决。
+
+#### 7.7.2 提交配额：201 吞提交 vs 403 硬封锁
+
+`POST /alphas/{id}/submit` 的返回码要分三种，**只看 2xx 不够**：
+
+| 返回 | 含义 | 处置 |
+|------|------|------|
+| 200 / 201 | 请求被接受，**但不等于进了审核队列** | 继续核验 `dateSubmitted` 非 None 且 status 离开 `UNSUBMITTED` |
+| 429 | 软限频 | 读 `Retry-After` 退避后重试 |
+| 403 | **提交配额耗尽（硬封锁）** | 无 `Retry-After`，立刻重试无效，等配额窗口重置 |
+
+**坑一：201 吞提交（静默丢弃）** — 返回 201，但 `dateSubmitted` 恒为 `None`、status 卡 `UNSUBMITTED`、`SELF_CORRELATION` 一直 `PENDING`。这表示提交被丢弃、alpha 从未进队列，此时**相关性检查永远不会开始算**，不能据此判断因子重复。`submit_verified` 会在 2 分钟无 `dateSubmitted` 时返回 `submit_swallowed(...)`。
+
+**坑二：403 硬封锁** — 配额耗尽后 submit 稳定 403，响应体是 IS 检查列表、无 `Retry-After`。BRAIN 未暴露剩余提交配额端点（`/limits` 等均 404），只能靠时间窗等待。`submit_verified` 直接返回 `submit_403_quota_exhausted`。
+
+**坑三：`/alphas` 集合端点对部分账号返回 405** — 既不能 `GET` 枚举，也不能 `POST` 建 alpha；只能 `GET /alphas/{id}` 按 id 查。此时"提交前拉全部 alpha 算日收益相关"不可行，只能依赖信号成分重叠护栏 + BRAIN 自己的信号级相关性。`BrainSession.alphas()` 遇到 405 会抛错，请捕获后退化为按 id 查。
+
+### 7.8 重复仿真去重（省额度）
+
+官方推荐：对 payload 做 sha256，本地缓存 `hash → alpha_id`，命中就复用，不再提交。
 
 ```python
-def get_all_alphas(session, limit=100):
-    all_alphas = []
-    offset = 0
-    while True:
-        data = session.get(f"{API_BASE}/users/self/alphas", params={"limit": limit, "offset": offset}).json()
-        batch = data.get("results", data.get("alphas", []))
-        if not batch:
-            break
-        all_alphas.extend(batch)
-        if len(batch) < limit:
-            break
-        offset += limit
-    return all_alphas
-
-all_alphas = get_all_alphas(session)
-active = [a for a in all_alphas if a.get("status") == "ACTIVE"]
-print(f"total={len(all_alphas)}, ACTIVE={len(active)}")
+from wq_api import SimulationCache
+cache = SimulationCache("simulation_cache.jsonl")
+results = brain.run_cached(payloads, cache, batch_size=8)
 ```
+
+用 LLM/模板批量生成表达式时，这一步能省掉大量重复额度——**同一表达式换个权重往往是"新" payload，但同一份配置重复跑毫无意义**。
+
+### 7.9 拉取最新官方文档（保持同步）
+
+平台文档站是 SPA，匿名抓不到内容，但内容接口可用（需登录态 cookie）：
+
+```python
+GET https://api.worldquantbrain.com/tutorials?limit=50          # 目录：11 个教程 / 80+ 页
+GET https://api.worldquantbrain.com/tutorial-pages/<page_id>    # 正文（blocks 数组）
+```
+
+常用 `page_id`：
+
+| page_id | 内容 |
+|---------|------|
+| `brain-api` | BRAIN HTTP API 全量端点与错误码 |
+| `understanding-simulation-limits` | 每日额度与 `X-Ratelimit-*` |
+| `multi-alpha-simulation` | 多仿真与 Test Period |
+| `consultant-submission-tests` | **顾问级提交阈值**、IS Ladder、Cluster |
+| `consultant-features` | OS 测试项、MaxTrade/MaxPosition、Prod Correlation |
+| `how-can-you-avoid-duplicate-simulations` | hash 去重缓存 |
+| `alpha-submission` | 提交测试细则 |
+
+正文是 block 数组（`HEADING`/`TEXT`/`TABLE`/`EQUATION`/`IMAGE`），按 `type` 渲染即可。**每次大改代码前先拉 `brain-api` 的 `lastModified` 比对**。
+
+### 7.10 常见 API 错误
+
+| 现象 | 原因与处理 |
+|------|------------|
+| `400 "Invalid data field"` | 字段名错，或把 vector/matrix 字段用于不支持的算子 |
+| `400 "Got invalid input at index 0, must be an event data"` | 向量算子传了常数 |
+| `400` 且 body 为 `{"settings": {"region": ["This field is required."]}}` | 必填项缺失，按字段路径逐个补 |
+| `400 "Expected ISO 8601 datetime with timezone"` | 列表过滤的时间参数要带时区 |
+| `404` on `/users/self/alphas` | 路径错；正确是 `GET /users/self/alphas`（或 `/users/<id>/alphas`） |
+| 仿真 `ERROR` 带 `location` | `{property, line, start, end}` 直接定位表达式语法错误 |
+| 仿真长期无 `status` 字段 | 进行中的 GET 只返回 `progress`，别把它当异常 |
 
 ---
 
@@ -632,16 +762,19 @@ print(f"total={len(all_alphas)}, ACTIVE={len(active)}")
 
 - [ ] 已获取 **所有** alpha 列表（含 ACTIVE / UNSUBMITTED），不只是本次模拟
 - [ ] 新因子与已有 ACTIVE alpha **日收益** 相关性 < 0.7（或新 Sharpe ≥ 旧 Sharpe × 1.1）
-- [ ] 相关性基于 **日收益** 计算，不是累计 PnL
+- [ ] 相关性基于 **日收益** 计算、**按日期交集对齐**，不是累计 PnL
 - [ ] 字段已验证
-- [ ] 模拟无报错
-- [ ] Sharpe ≥ 1.3（理想 ≥ 1.5）
-- [ ] Fitness ≥ 1.1
-- [ ] Turnover 1%–20%（可放宽至 ≤ 35%）
+- [ ] 若套用模板：模板信号字段与用户给定字段**同一 dataset**（4.1.1 硬门槛），不一致 = 混信号，已停止执行
+- [ ] 模拟无报错；`checks` 里没有 `OLD_SIMULATION = FAIL`（否则先重模拟）
+- [ ] Sharpe ≥ **1.58**（顾问 D1）/ ≥ **2.69**（顾问 D0），普通账号 ≥ 1.25
+- [ ] Fitness ≥ **1.0**（顾问 D1）/ ≥ **1.5**（顾问 D0）
+- [ ] Turnover 1%–70%（SuperAlpha 2%–40%）
 - [ ] Drawdown < 15%
-- [ ] 所有 IS 检查 PASS
+- [ ] `LOW_SHARPE` / `LOW_FITNESS` / `LOW_SUB_UNIVERSE_SHARPE` / `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE` 全 PASS
+- [ ] `CONCENTRATED_WEIGHT` PASS（单股 < 10%）
 - [ ] 多空数量合理
 - [ ] 提交后 **再次确认 status == ACTIVE**，201 不代表上线
+- [ ] 检查 `SELF_CORRELATION` 与 `PROD_CORRELATION`（顾问）均未 FAIL
 
 ---
 
@@ -657,6 +790,10 @@ print(f"total={len(all_alphas)}, ACTIVE={len(active)}")
 8. **50/50 正交混合能降低换手，但未必能降低相关**；相关靠信号来源，不靠权重。
 9. **字段先验证**，无效字段秒级报错。
 10. **USA TOP3000 里真正的低相关很难做**；同一数据池的 "不同" 表达式往往高度相关。
+11. **套模板先过数据集一致性门槛（4.1.1）**：模板信号字段与用户给定字段不同 dataset = 混信号，立即停止，不模拟不提交。
+12. **阈值跟着账号走**：顾问账号 D1 要 Sharpe > 1.58（不是 1.25），并且多两道 `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE`；低换手（TO<30%）能让 IS Ladder 的 PASS 阈值打 0.85 折。
+13. **API 字段以 `OPTIONS /simulations` 为准**，文档正文可能是旧版（旧文档里的 `testPeriod`/`maxTrade` 已进 settings，而 `status` 在仿真进行中并不返回，只有 `progress`）。
+14. **额度是最硬约束**：所有成功仿真都计数（含多仿真子任务、重跑同一 alpha），必须用 hash 缓存去重。
 
 ---
 
@@ -683,13 +820,17 @@ print(f"total={len(all_alphas)}, ACTIVE={len(active)}")
 
 ```bash
 # 1. 预览：生成建议追加的 markdown 片段，不修改任何文件
-pyenv exec python scripts/evolve_skill.py
+python scripts/evolve_skill.py
 
 # 2. 提交：追加到 SKILL.md 并更新 alpha_db.json
-pyenv exec python scripts/evolve_skill.py --apply
+python scripts/evolve_skill.py --apply
+
+# 首次全量快照时限制 PnL 抓取数量（默认 60，避免 500+ 次串行请求）
+python scripts/evolve_skill.py --max-pnl-fetch 30
 ```
 
 > 注意：**不带 `--apply` 的预览模式不会修改 `alpha_db.json` 和 `SKILL.md`**，你可以先审查再提交。脚本仅依赖 `requests` 和 `numpy`，**不需要 `wq-bus` 项目代码**。数据文件已随 SKILL 分发。
+> `alpha_db.json` 现以 `[[date, value], ...]` 存 PnL；旧的纯 float 列表仍可读取（退化为按位置对齐）。
 
 脚本会：
 
@@ -778,7 +919,27 @@ USA TOP3000 delay=1 实证结论：
 13. **反转分量 + decay=5 是 TO/Fitness 甜点**：`0.3*ROE+0.2*mdl77动量+0.5*反转` decay=5 → Sharpe 3.15/Fit 2.19/TO 34.3%（decay=0 时 TO 56%、Fitness 1.23）。反转主导组合（超跌+高ROE+弱趋势确认）本身就是「错杀好公司」的低相关实现。
 14. **SELF_CORRELATION 检查代码**：必须按**日期交集**对齐算日收益相关（位置对齐会低估相关）；PnL recordset 空结果重试 ≥3 次；高相关时打印冲突源表达式。
 
+### 2026-10-29 — 按最新官方文档对齐 API 层（顾问权限）
 
+依据：`GET /tutorial-pages/brain-api`（lastModified **2026-09-21**）、`consultant-submission-tests` / `understanding-simulation-limits` / `multi-alpha-simulation` / `consultant-features`（均 2026-09-18），并用顾问账号在真实 API 上逐项验证。
 
+**验证到的事实（改动旧认知的部分）**
 
+1. **顾问阈值远高于旧文档**：真实 check 的 `limit` 为 `LOW_SHARPE=1.58`、`LOW_FITNESS=1.0`、`HIGH_TURNOVER=0.7`、`LOW_SUB_UNIVERSE_SHARPE=1.05`（USA TOP3000 D1）。旧 SKILL 里写的 1.25 / 1.1 是普通账号标准。
+2. **新增两类 check**：`IS_LADDER_SHARPE`（带 `year`/`startDate`/`endDate`）与 `LOW_2Y_SHARPE`（近 2 年 Sharpe，limit 同为 1.58）；弱信号会直接卡在 `LOW_2Y_SHARPE`。另有 `OLD_SIMULATION`（FAIL 表示需重模拟）、`DATA_DIVERSITY`、`PROD_CORRELATION`、`REGULAR_SUBMISSION`、`CLUSTER_TEST`（`ERROR` 也不阻断）。
+3. **仿真进行中的 GET 不返回 `status`**：只有 `progress`。把"无 status"当异常会误判超时；正确做法是以 `Retry-After` 是否归零判断终态。
+4. **多仿真确实可用**：`POST /simulations` 传 2 元素数组 → 父 sim 返回 `children` → 子 sim 各自带 `alpha`。实测 2 路 QUICK 模式约 95 秒完成。额度**按子仿真逐个计数**（4998→4994），多仿真只省时间不省额度。
+5. **额度响应头**：`X-Ratelimit-Limit=5000` / `Remaining` / `Reset`（顾问账号实测）。
+6. **列表可服务端过滤**：`GET /users/self/alphas?status=ACTIVE` 直接返回 22 条，不必拉全量 564 条再本地筛。
+7. `OPTIONS /simulations` 的 settings 比正文文档多出 `maxTrade` / `maxPosition` / `testPeriod` / `lookback` / `simulationMode` / `selectionHandling` / `selectionLimit`；`type` 实为 `REGULAR` / `REGION_AGNOSTIC`（不是文档写的 `SUPER`）。
 
+**代码改动**
+
+- 新增 `scripts/wq_api.py`：统一认证/权限、`Retry-After` 轮询、终态机、多仿真、额度跟踪、`status=` 过滤、记录集解析、日期对齐相关、`SimulationCache` 去重、顾问阈值 `gate_report`、`submit_verified`。
+- 新增 `scripts/simulate_batch.py`：批量回测 + 去重 + 可选提交（替代各 `wq_*_opt*.py` 里复制的样板）。
+- 重写 `evolve_skill.py` / `wq_bulltrap_{opt,opt2,opt3,submit,record}.py` / `wq_fcf_{opt,corr,submit}.py` / `wq_ltinv_opt.py`，删掉各自的 `simulate()` 与固定 `sleep(8)`。
+
+**仍有风险**
+
+- `CLUSTER_TEST` 目前返回 `ERROR`（平台侧无数据），不影响提交但也不提供信息。
+- 日收益相关仍是 proxy；`SELF_CORRELATION` 用信号级相关，护栏 2（信号成分重叠）不可省。

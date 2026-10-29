@@ -1,9 +1,13 @@
 credential.txt
 alpha_db.json
 batch_submit_results.json
+simulation_cache.jsonl
+batch_results.json
+scripts/_*_results.json
 *.pyc
 __pycache__/
 .DS_Store
 .env
 .venv/
 venv/
+.workbuddy/

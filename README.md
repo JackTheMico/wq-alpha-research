@@ -55,8 +55,10 @@ Recommended loop:
 wq-alpha-research/
 ├── SKILL.md
 ├── scripts/
-│   ├── evolve_skill.py
-│   └── submit_batch.py
+│   ├── wq_api.py            # shared BRAIN client (auth, multi-sim, rate limits, recordsets)
+│   ├── simulate_batch.py    # batch simulate / optional submit, with dedup cache
+│   ├── evolve_skill.py      # self-evolution: diff alphas, correlations, lesson snippets
+│   └── wq_*.py              # archived per-experiment variant runners
 └── references/
     ├── wq_usa_top3000_delay1_data_fields.csv
     ├── wq_usa_top3000_delay1_data_fields.json
@@ -114,6 +116,20 @@ Or create a local `credential.txt` file:
 
 ## Scripts
 
+All scripts share one client, `scripts/wq_api.py`, which follows the current BRAIN API docs
+(2026-09): `Retry-After`-driven polling, the full terminal-status set
+(`COMPLETE` / `WARNING` / `TIMEOUT` / `FAIL` / `CANCELLED` / ...), multi-simulation via an array
+POST, `X-Ratelimit-*` tracking, server-side `?status=` filtering, and date-aligned PnL correlation.
+
+Batch simulate a variant file (dedup cache on by default, so identical configs never burn quota twice):
+
+```bash
+python scripts/simulate_batch.py --file variants.json --batch-size 8
+python scripts/simulate_batch.py --expr "group_rank(ts_rank(operating_income/equity,126),subindustry)"
+python scripts/simulate_batch.py --file variants.json --dry-run     # print payloads only
+python scripts/simulate_batch.py --file variants.json --submit      # submit gate-passing alphas
+```
+
 Preview skill evolution output without modifying files:
 
 ```bash
@@ -126,13 +142,8 @@ Apply updates to local `SKILL.md` and `alpha_db.json` after reviewing the previe
 python scripts/evolve_skill.py --apply
 ```
 
-Run the batch submission example:
-
-```bash
-python scripts/submit_batch.py
-```
-
-The scripts require `requests` and `numpy`. `alpha_db.json` is a local memory file and is intentionally ignored by git.
+The scripts require `requests` and `numpy`. `alpha_db.json` and `simulation_cache.jsonl` are local
+memory files and are intentionally ignored by git.
 
 ## Safety Notes
 
