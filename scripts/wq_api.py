@@ -724,10 +724,17 @@ def submit_verified(
       * **201 吞提交**：返回 201 但 `dateSubmitted` 始终为 None、status 卡 `UNSUBMITTED`
         —— 提交被丢弃，SELF_CORRELATION 也就永远不会开始算。
       * **403 硬封锁**：账户提交配额耗尽，无 `Retry-After`，立刻重试无效。
+        但实测（2026-10-30）403 也可能是**相关性 FAIL**：BRAIN 会把完整 IS checks
+        塞进 403 响应体，此时不能用「配额耗尽」一概而论，必须解析 body。
+
+    2026-10-30 新增：被吞的 201 之后再 POST 一次，403 响应体就是**最终判定书**。
+    这是拿到 SELF/PROD 相关性真实数值的唯一途径——ACTIVE alpha 的
+    `is.prodCorrelation` 恒为 0.0（平台不回算），轮询永远得不到数值。
     """
     resp = brain.submit(alpha_id)
     if resp.status_code == 403:
-        return "submit_403_quota_exhausted"
+        detail = submit_verdict(resp)
+        return f"submit_blocked({detail})" if detail else "submit_403_quota_exhausted"
     if resp.status_code == 429:
         return f"submit_429_retry_after={resp.headers.get('Retry-After')}"
     if resp.status_code not in (200, 201):
@@ -747,8 +754,33 @@ def submit_verified(
             return f"PROD_CORRELATION_{prod_corr:.4f}"
         # 201 吞提交判别：2 分钟仍无 dateSubmitted 且停在 UNSUBMITTED
         if i >= 12 and not alpha.get("dateSubmitted") and status == "UNSUBMITTED":
-            return "submit_swallowed(201 but dateSubmitted=None)"
+            # 再 POST 一次：BRAIN 会把带完整 IS checks 的判定书放在 403 响应体里。
+            retry = brain.submit(alpha_id)
+            detail = submit_verdict(retry)
+            if detail:
+                return f"submit_blocked({detail})"
+            return f"submit_swallowed(201 then {retry.status_code})"
     return f"still_{brain.alpha(alpha_id).get('status')}"
+
+
+def submit_verdict(resp: "requests.Response") -> str:
+    """从 submit 的 403 响应体解析真实判定。
+
+    403 的 body 形如 `{"is": {"checks": [...]}}`，里面是**提交时实时计算**的
+    IS checks（含 SELF_CORRELATION / PROD_CORRELATION 的真实数值）。返回
+    `NAME=value(limit=...)` 拼接串；无 FAIL 则返回空串（那才是真的配额耗尽）。
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return ""
+    checks = ((body or {}).get("is") or {}).get("checks") or []
+    fails = [c for c in checks if c.get("result") in ("FAIL", "ERROR")]
+    if not fails:
+        return ""
+    return "; ".join(
+        f"{c.get('name')}={c.get('value')}(limit={c.get('limit')})" for c in fails
+    )
 
 def simulate_one(
     brain: BrainSession,

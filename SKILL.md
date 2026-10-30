@@ -275,6 +275,9 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 - 质量腿 `operating_income/equity` 与 `free_cash_flow_reported_value/equity` 已被占用；再跑同骨架必须**换质量腿**（`cashflow_op/equity`、`enterprise_value/ebitda`、`operating_income/liabilities`）或**换期权腿口径**（`implied_volatility_mean_skew_90`、`pcr_oi_270`、270/360 期限）。
 - `2rpzeGab` 与 `ZYE31mzx` 是**同一表达式**（仅 decay 10 vs 15）→ 重复仿真，勿再跑；用 `SimulationCache` 去重可避免此类浪费。
 
+> ⚠️ **换期权腿的期限/口径都不足以逃出这个簇（2026-10-30 实测 20 次仿真反证）**：把 IV 腿分别换成 90 / 120 / 270 天期限的 call-put skew、`implied_volatility_mean_skew_270/360`、`pcr_oi_270`，与池内纯 IV 腿 alpha `58p0232N` 的日收益相关仍在 **0.70–0.81**，与 `ZYE31mzx` 0.61–0.67，与 `XgoQMAq1` 0.55–0.94。原因是 SELF_CORRELATION 看的是**信号族**，不是字段串——同一个经济含义（期权 skew）换期限只是换个采样窗口。
+> **结论：模板 G 在当前池里已经饱和，继续在 IV 簇里换字段是无效工作量。要留在「双腿混合」骨架上，第二腿必须换到池外数据族**（pv1 价量反转 / news / socialmedia / model）。实测 pv1 反转腿 `rank(-(close/open-1))` 在 22 个 ACTIVE 中无人使用，配 `cashflow_op/equity` 后与池内最大相关仅 0.509。
+
 ### 4.2 推荐默认设置
 
 | 因子类型 | Decay | Neutralization | Truncation | nanHandling | 预期 TO |
@@ -299,6 +302,15 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | Turnover | 日交易额 / Book Size | 1%–70% |
 | Drawdown | 峰值到谷值最大回撤 | < 15% |
 | Margin | PnL / 总交易额 | 越高越好 |
+
+#### Fitness 公式的两个实战推论（2026-10-30 实测校准，重要）
+
+`Fitness = Sharpe × √(|Returns| / max(TO, 0.125))`，用 6 个真实仿真逐条反算验证吻合（误差 <0.005）。由此得到两条会直接改变优化方向的结论：
+
+1. **TO 低于 12.5% 时，再降 TO 对 Fitness 毫无贡献**——分母被 0.125 地板锁死。此时 `Fitness = 2.828 × Sharpe × √Returns`，只受 Sharpe 和 Returns 支配。低换手因子的「降 TO 提 Fitness」直觉在这个区间是错的。
+2. **开 TO 上限换取 Returns 通常是亏的**：把 decay 从 15 降到 0，TO 8.0%→19.7%、Sharpe 1.59→1.77，但 Fitness 反而 0.95→0.89（分母从地板 0.125 变成真实 TO 0.197，涨了 58%，而 Returns 只涨 12%）。**只有 Returns 的涨幅超过 TO 的涨幅（即 margin 提升）时，提 TO 才划算。**
+
+推论：Fitness 贴线时先动 **neutralization**（见 §6）和 **信号质量**，decay 只在 TO 已经 >12.5% 时才是有效杠杆。
 
 ### 5.1.1 提交阈值：顾问账号 vs 普通账号（易踩坑）
 
@@ -353,13 +365,25 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | **IS_LADDER_SHARPE** | 分年阶梯（D1 FAIL 1.59；见 5.2.1） | 近年 Sharpe 衰减 | 提高近年表现；TO<30% 时 PASS 阈值×0.85 |
 | **LOW_2Y_SHARPE** | 近 2 年 Sharpe ≥ 1.58（D1） | 近年失效 | 同上 |
 | **SELF_CORRELATION** | 0.7（信号级） | 与已提交 alpha 太像 | 换信号簇/换数据源；不要只调参数 |
-| **PROD_CORRELATION** | 0.7（对 PROD 池） | 与生产池太像 | 同上；顾问独有 |
+| **PROD_CORRELATION** | 0.7（对 PROD 池） | 与生产池太像 | 顾问独有，**本地护栏完全无法预测**（见下） |
 | **POWER_POOL_CORRELATION** | 0.5 | Power Pool 通道内相关性 | 见 §5.1.2；⚠️ 实测在 ACTIVE 上恒 `PENDING`，平台不回算，只能按复杂度约束自行预筛 |
 | DATA_DIVERSITY | 信息性/受限 | 数据源单一 | 引入新 dataset |
 | OLD_SIMULATION | — | 仿真过旧 | **重新模拟**后再提交。⚠️ 它同时是**掉线预警**：2026-10-30 实测 9 条 OLD_SIMULATION=FAIL 的存货全部重跑，Sharpe 平均 −0.42、9/9 全灭。看到它就别指望原指标，重跑前先按「大概率要重做」来规划 |
 | CLUSTER_TEST | Sharpe ≥ 1.58（KOR/JPS/TWN/HKG/IND/GBR/DEU ≥ 1） | 仅分类，不阻断 | 无影响（`ERROR` 也不阻断） |
 | MATCHES_PYRAMID / MATCHES_THEMES | multiplier | 仅加分项 | 无影响 |
 | OSMOSIS_ALLOCATION | — | 仅 WARNING | 无影响 |
+
+**PROD_CORRELATION 的不可预测性（2026-10-30 实测，重要）**
+
+本地护栏只能拿自己的 ACTIVE 池当日收益算相关，它近似的是 `SELF_CORRELATION`，**对 `PROD_CORRELATION` 毫无预测力**：
+
+- 护栏预测 `E560gqE1` 最大相关 **0.509**（对 `YPvlEl0l`），实际 `SELF_CORRELATION = 0.6226`（PASS）、`PROD_CORRELATION = 0.8045`（**FAIL**）。护栏低估约 0.11，且完全没覆盖生产池。
+- `is.prodCorrelation` 在 22 条 ACTIVE 上**全部为 0.0**，平台不回算；`POWER_POOL_CORRELATION` 同样恒 `PENDING`。所以「按信号族统计 prod 拥挤度」这条路做不出来，别再试。
+
+推论：
+1. **护栏只能用来排除，不能用来放行**。护栏 ≥ 0.45 就当高危（0.509 → 实际 0.6226），别因为「护栏说 0.51 没问题」就放心提交。
+2. **真正的判定只有提交那一刻才产生**，且只能从 403 响应体读（见 §7.7.2 坑二）。所以每条候选的边际成本不只是仿真额度，还有一次提交尝试。
+3. 指标全 PASS ≠ 能提交。`E560gqE1`（S=2.10 / F=1.43 / 全 IS check PASS，本地 gate PASS）照样被 `PROD_CORRELATION` 一票否决。
 
 #### 5.2.1 IS Sharpe Ladder（D1）
 
@@ -393,7 +417,7 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 
 | 症状 | 可能原因 | 修复 |
 |------|----------|------|
-| Fitness < 1.0 | 换手 > 30% | 增大 decay、混合基本面、ts_decay_linear |
+| **Fitness < 1.0 且 TO < 12.5%** | 分母被 0.125 地板锁死，降 TO 无效；缺的是 Returns | **第一顺位：把 neutralization 从 SUBINDUSTRY 换成 INDUSTRY**（2026-10-30 同一表达式实测 F 0.95→1.08、Returns 4.47%→5.32%、TO 只从 8.0% 动到 7.4%）。第二顺位提 Sharpe。❌ 不要靠降 decay 提 TO（见 §5.1 推论 2） |
 | Sharpe < 1.25 | 信号弱 | 拉长窗口、group_rank、换字段 |
 | TO > 50% | 信号变化太快 | decay 10–30、trade_when、混合 |
 | DD > 15% | 波动大/杠杆高 | 增大 decay、降 truncation、混合低波信号 |
@@ -731,11 +755,18 @@ brain.prod_correlation(alpha)
 |------|------|------|
 | 200 / 201 | 请求被接受，**但不等于进了审核队列** | 继续核验 `dateSubmitted` 非 None 且 status 离开 `UNSUBMITTED` |
 | 429 | 软限频 | 读 `Retry-After` 退避后重试 |
-| 403 | **提交配额耗尽（硬封锁）** | 无 `Retry-After`，立刻重试无效，等配额窗口重置 |
+| 403 | **两类**：① 提交配额耗尽（硬封锁）；② **相关性 FAIL 的判定书** | 先解析 body（见坑二），再决定是等配额还是换信号 |
 
-**坑一：201 吞提交（静默丢弃）** — 返回 201，但 `dateSubmitted` 恒为 `None`、status 卡 `UNSUBMITTED`、`SELF_CORRELATION` 一直 `PENDING`。这表示提交被丢弃、alpha 从未进队列，此时**相关性检查永远不会开始算**，不能据此判断因子重复。`submit_verified` 会在 2 分钟无 `dateSubmitted` 时返回 `submit_swallowed(...)`。
+**坑一：201 吞提交（静默丢弃）** — 返回 201，但 `dateSubmitted` 恒为 `None`、status 卡 `UNSUBMITTED`、`SELF_CORRELATION` 一直 `PENDING`。这表示提交被丢弃、alpha 从未进队列。**正确处置：再 POST 一次**——第二次通常返回 403，其响应体就是带真实数值的最终判定（见坑二）。`submit_verified` 已内置这一步，返回 `submit_blocked(...)`。
 
-**坑二：403 硬封锁** — 配额耗尽后 submit 稳定 403，响应体是 IS 检查列表、无 `Retry-After`。BRAIN 未暴露剩余提交配额端点（`/limits` 等均 404），只能靠时间窗等待。`submit_verified` 直接返回 `submit_403_quota_exhausted`。
+**坑二：403 ≠ 一定是配额耗尽（2026-10-30 修正）** — 403 响应体形如 `{"is": {"checks": [...]}}`，是**提交时实时计算**的完整 IS checks。实测 `E560gqE1` 的 403 body 里：`PROD_CORRELATION FAIL value=0.8045 limit=0.7`、`SELF_CORRELATION PASS 0.6226`、`REGULAR_SUBMISSION PASS value=0 limit=4`——配额根本没用完，FAIL 的是生产池相关。
+
+```python
+from wq_api import submit_verdict
+detail = submit_verdict(resp)   # "PROD_CORRELATION=0.8045(limit=0.7)" 或 ""（空=真配额耗尽）
+```
+
+这是**唯一**能拿到相关性真实数值的途径：`is.prodCorrelation` 在 ACTIVE alpha 上恒为 `0.0`（平台不回算，与 `POWER_POOL_CORRELATION` 同为僵尸字段），轮询一万年也读不到。因此 403 必须先解析 body，只有 body 里没有 FAIL 项时才是真的配额耗尽。
 
 **坑三：`/alphas` 集合端点对部分账号返回 405** — 既不能 `GET` 枚举，也不能 `POST` 建 alpha；只能 `GET /alphas/{id}` 按 id 查。此时"提交前拉全部 alpha 算日收益相关"不可行，只能依赖信号成分重叠护栏 + BRAIN 自己的信号级相关性。`BrainSession.alphas()` 遇到 405 会抛错，请捕获后退化为按 id 查。
 
@@ -862,7 +893,9 @@ GET https://api.worldquantbrain.com/tutorial-pages/<page_id>    # 正文（block
 12. **阈值跟着账号走**：顾问账号 D1 要 Sharpe > 1.58（不是 1.25），并且多两道 `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE`；低换手（TO<30%）能让 IS Ladder 的 PASS 阈值打 0.85 折。
 13. **API 字段以 `OPTIONS /simulations` 为准**，文档正文可能是旧版（旧文档里的 `testPeriod`/`maxTrade` 已进 settings，而 `status` 在仿真进行中并不返回，只有 `progress`）。
 14. **额度是最硬约束**：所有成功仿真都计数（含多仿真子任务、重跑同一 alpha），必须用 hash 缓存去重。
-15. **先清点存货，但别信存货的旧指标**：`scripts/template_hitrate.py --stock` 能免费列出历史库里「曾过门槛但仍 UNSUBMITTED」的 alpha（2026-10-30 实测 9 条），值得先扫一遍；但**这些指标只在仿真当时成立**。实测把这 9 条按原样重跑，平均 −0.42 Sharpe、**9/9 全灭**。所以存货的正确用法是：拿它的**表达式当新因子的候选骨架**，而不是当成能直接提交的资产；只要 `OLD_SIMULATION=FAIL`，重跑就是要花额度的，且大概率掉线（见 §12 2026-10-30 第二条）。
+15. **Fitness 贴线时先换 neutralization，不要先动 decay**：`Fitness = Sharpe × √(Returns / max(TO, 0.125))`（已用 6 条真实仿真反算校准）。TO < 12.5% 时分母被地板锁死，降 TO 零收益；此时 SUBINDUSTRY→INDUSTRY 是性价比最高的一刀（实测 F 0.95→1.08）。decay 只在 TO 已 >12.5% 时才值得动。
+16. **腿的独占性按「数据族」判，不按「字段名」判**：换期限（90/120/180/270）、换口径（call-put skew / mean_skew / pcr_oi）都逃不出同一族的 SELF_CORRELATION（实测与同族 alpha 相关仍 0.70–0.94）。要降相关就必须换到池内无人用的数据族。
+17. **先清点存货，但别信存货的旧指标**：`scripts/template_hitrate.py --stock` 能免费列出历史库里「曾过门槛但仍 UNSUBMITTED」的 alpha（2026-10-30 实测 9 条），值得先扫一遍；但**这些指标只在仿真当时成立**。实测把这 9 条按原样重跑，平均 −0.42 Sharpe、**9/9 全灭**。所以存货的正确用法是：拿它的**表达式当新因子的候选骨架**，而不是当成能直接提交的资产；只要 `OLD_SIMULATION=FAIL`，重跑就是要花额度的，且大概率掉线（见 §12 2026-10-30 第二条）。
 
 ---
 
@@ -1082,3 +1115,49 @@ USA TOP3000 delay=1 实证结论：
 
 **对「门槛提高」这个问题的直接回答**：数值没提高，但**有效门槛确实在上升**，机制是两个——① 信号随时间衰减（9 条存货平均 −0.42 Sharpe）；② 自己的 ACTIVE 池越厚，SELF_CORRELATION 越难过（豁免要求新 Sharpe ≥ 冲突 × 1.1，池里最强已到 2.75，等于要求新 alpha 做到 3.03）。**这是"池子变挤"，不是"分数线变高"。**
 
+
+### 2026-10-30 — IV skew × ROE（模板 G）优化：Fitness 解法与「换字段」的边界
+
+用户给 `0.5*rank(ts_mean((iv_call_180-iv_put_180)/iv_mean_180,5)) + 0.5*group_rank(ts_rank(operating_income/equity,126),subindustry)`，反馈 Fitness 略低（实测 `LLMbXVjn` S=1.59 / F=0.95 / TO=8.0%，`LOW_FITNESS` FAIL；`E560aaxm` S=1.63 / F=1.00 卡 `LOW_SUB_UNIVERSE_SHARPE` 0.70 vs 0.71）。两轮共 20 次仿真（额度 5000→4971）。
+
+**结论一：Fitness 的解药是 INDUSTRY 中性化，不是 decay。** 同一表达式 SUBINDUSTRY(d15) → INDUSTRY(d15)：`F 0.95→1.08`、`Returns 4.47%→5.32%`、TO 几乎不动（8.0%→7.4%），`mLo2xNm9` 全部 IS check PASS。反向验证：decay 15→0 把 TO 抬到 19.7%、Sharpe 抬到 1.77，Fitness 反而掉到 0.89——因为分母从地板 0.125 变成真实 TO 0.197（+58%）而 Returns 只涨 12%。
+
+**结论二：这条表达式无论如何都提交不了。** 护栏 1 显示 `mLo2xNm9` 与已 ACTIVE 的 `ZYE31mzx`（同一表达式）日收益相关 **0.975**，豁免需 Sharpe ≥ 2.37×1.1 = 2.61，实测 1.66 → 必 FAIL。
+
+**结论三：在 IV 簇内换字段是无效工作量。** 20 次仿真里把 IV 腿换成 90/120/270 天 skew、`implied_volatility_mean_skew_270/360`、`pcr_oi_270`，质量腿换成 `cashflow_op/equity`、`operating_income/assets`、`free_cash_flow_reported_value/assets`、`ebitda/enterprise_value`，与池内 IV 类 ACTIVE（`58p0232N`/`ZYE31mzx`/`XgoQMAq1`）的日收益相关全部落在 **0.55–0.94**，无一低于 0.5。附带发现：IV × 现金流质量腿的组合几乎必然触发 `LOW_SUB_UNIVERSE_SHARPE`（0.29–0.51 vs limit 0.73–0.81），换期限 / 换中性化 / 降 truncation 都救不回来。
+
+**结论四：脱簇后的可行解。** 把第二腿换到池内无人使用的 pv1 反转腿：
+
+```fastexpr
+0.4 * rank(-(close / open - 1))
++ 0.6 * group_rank(ts_rank(cashflow_op / equity, 126), subindustry)
+-- decay=10, neutralization=INDUSTRY, truncation=0.08, nanHandling=ON
+```
+
+`E560gqE1` → **Sharpe 2.10 / Fitness 1.43 / TO 11.7% / Returns 5.81% / DD 2.7%**，全部 IS check PASS；护栏 2 无信号成分重叠；护栏 1 最大相关 **0.509**（vs `YPvlEl0l` S=1.63，豁免门槛 1.79，2.10 已满足），其余 0.401 / 0.373。次优 `bl62oNLK`（0.4×IV120 + 0.6×反转，S=1.71 / F=1.15 / TO 23.6%）与 `58p0232N` 相关 0.684，豁免门槛恰好 1.71——贴线，不建议。
+
+**方法论沉淀**：本轮把「优化」拆成两个独立问题分别验证——① 指标能不能过（参数邻域搜索，3 次仿真定位 INDUSTRY）；② 相关能不能过（护栏 1+2，7 次仿真证明 IV 簇已饱和）。**先用少量仿真确认「指标解」存在，再用护栏判断这个骨架值不值得继续投入，比直接扑在字段排列组合上省得多。**
+
+### 2026-10-30 — 提交 E560gqE1 失败：PROD_CORRELATION 0.8045 硬否决，以及「403 响应体才是判定书」
+
+按上一轮结论提交 `E560gqE1`（0.4×pv1 反转 + 0.6×cashflow_op/equity，S=2.10 / F=1.43 / TO 11.7%）。**结果：未提交成功，被 `PROD_CORRELATION` 一票否决。**
+
+**过程**：复核全绿（本地 gate PASS，13 项 IS check 全 PASS，`CLUSTER_TEST` 仅 WARNING），`POST /submit` 返回 **201**，但轮询 2 分钟 `dateSubmitted` 始终 `None`、status 卡 `UNSUBMITTED` —— 典型的「201 吞提交」。**再 POST 一次拿到 403，响应体给出了真实判定**：
+
+```
+PROD_CORRELATION  FAIL    value=0.8045 limit=0.7
+SELF_CORRELATION  PASS    value=0.6226 limit=0.7
+REGULAR_SUBMISSION PASS   value=0      limit=4      ← 配额根本没用完
+```
+
+**三条结论**
+
+1. **指标全 PASS 与「能提交」是两件事。** `E560gqE1` 的每一项本地与平台 IS 指标都过线，`CLUSTER_TEST` 只是 WARNING，照样被生产池相关一票否决。此后评估候选的口径必须改成「指标 + 相关性」双轨，且相关性以提交时的 403 body 为准。
+
+2. **本地护栏只能排除、不能放行。** 护栏用自己的 ACTIVE 池算日收益相关，近似 `SELF_CORRELATION`；它给出 0.509，实际 0.6226（低估 0.11），而真正致命的 `PROD_CORRELATION` 护栏**完全覆盖不到**。护栏 ≥ 0.45 就应按高危处理。
+
+3. **`is.prodCorrelation` 是僵尸字段。** 22 条 ACTIVE 上全部为 `0.0`，平台不回算（`POWER_POOL_CORRELATION` 同样恒 `PENDING`）。因此「按信号族统计生产池拥挤度、挑不拥挤的族去造」这条路**做不出来**，已放弃并删除了相应脚本，不要再试。
+
+**对 `E560gqE1` 的判读**：0.4×反转 + 0.6×现金流质量 这个组合与生产池相关 0.80，说明两条腿各自都是极其拥挤的常见信号，`SELF_CORRELATION` 0.62 也印证了这一点。靠调权重/decay/中性化降不到 0.7 以下——这与 IV 簇那 7 次仿真的结论一致：**同一信号族内换参数/换期限不改变相关性量级**。要过，只能换数据源（ Analyst / Sentiment / 供应链 / 另类数据这类池内无人使用的）。
+
+**代码改动**：`wq_api.submit_verified` 在判定为「201 吞提交」后会自动再 POST 一次，并用新增的 `submit_verdict(resp)` 解析 403 body → 返回 `submit_blocked(PROD_CORRELATION=0.8045(limit=0.7))`；仅当 body 里没有任何 FAIL 项时才报 `submit_403_quota_exhausted`。新增 `scripts/submit_one.py`：先复核（status / gate / 全量 checks / 相关性）再决定是否提交，`--do-submit` 才真正动手，避免误提交与重复提交。
