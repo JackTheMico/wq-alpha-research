@@ -1161,3 +1161,23 @@ REGULAR_SUBMISSION PASS   value=0      limit=4      ← 配额根本没用完
 **对 `E560gqE1` 的判读**：0.4×反转 + 0.6×现金流质量 这个组合与生产池相关 0.80，说明两条腿各自都是极其拥挤的常见信号，`SELF_CORRELATION` 0.62 也印证了这一点。靠调权重/decay/中性化降不到 0.7 以下——这与 IV 簇那 7 次仿真的结论一致：**同一信号族内换参数/换期限不改变相关性量级**。要过，只能换数据源（ Analyst / Sentiment / 供应链 / 另类数据这类池内无人使用的）。
 
 **代码改动**：`wq_api.submit_verified` 在判定为「201 吞提交」后会自动再 POST 一次，并用新增的 `submit_verdict(resp)` 解析 403 body → 返回 `submit_blocked(PROD_CORRELATION=0.8045(limit=0.7))`；仅当 body 里没有任何 FAIL 项时才报 `submit_403_quota_exhausted`。新增 `scripts/submit_one.py`：先复核（status / gate / 全量 checks / 相关性）再决定是否提交，`--do-submit` 才真正动手，避免误提交与重复提交。
+
+### 2026-10-30 — 换数据源两轮 20 次仿真：0/20，以及「冷门字段」假说的破产
+
+`E560gqE1` 被 `PROD_CORRELATION 0.8045` 否决后的应对是「换数据源」。两轮各 10 次仿真（额度 4961→4941），**全部失败，最高 Sharpe 1.16**。
+
+**第三轮（只按「我方零使用」选源）** — 选出 model51（系统性风险）、pv13（竞品/供应链关系）、news18（Ravenpack）、socialmedia8。结果：Sharpe **0.10–0.52**，含 model51 腿的普遍带 **46%–64% 回撤**并 `CONCENTRATED_WEIGHT FAIL`。
+
+**第四轮（修正为「全局热门 ∩ 我方零使用」）** — 选出 `anl4_dts_rspe`（分析师分歧）、`anl4_netprofit_number`（覆盖度）、`capex/sales`、`adv20`、`sharesout`、`(high-low)/close`。结果：Sharpe **−0.33–1.16**，最好的是 `R4-3 0.5disp+0.5capex`（S=1.16 / F=0.62 / TO=4.9% / DD=3.9%）。
+
+**三条结论**
+
+1. **冷门是有原因的。** 只按「我方零使用」选，会选中全局也冷门的字段（model51 最高 userCount 4140、pv13 2818、socialmedia8 2783、news18 1238），它们本来就弱。改成「全局 userCount≥1500 ∩ 我方零使用」后，最好成绩从 0.52 提升到 1.16——方向对了，但**仍差 0.42 才够 1.58**，而参数邻域搜索历史上只能带来 ~0.07–0.10 的 Sharpe 提升。
+
+2. **pv1 微观结构腿在这批里全灭。** `rank(-adv20)`、`rank(-ts_delta(sharesout,250))`、`rank(-ts_mean((high-low)/close,20))` 单独配对的 Sharpe 是 0.11 / 0.80 / 0.11，回撤最高 81%。真正撑住的是**两条慢速基本面/分析师腿**的组合（disp + capex，DD 3.9%）。
+
+3. **`anl4_*_flag` / `anl4_*_ft` 是分类标记，不是数值预测值**（description 为 "forecast type (revision/new/...)"），不能做 `ts_rank`。同族只有 `*_number`（覆盖数量）、`anl4_dts_rspe`（估计标准差）、`anl4_ebit_value`（公告实际值）是数值字段——选字段前必须读 description，否则白烧仿真。
+
+**由此产生的策略修正（重要）**：既然 `PROD_CORRELATION` 既不可预测也难以靠换源规避，另一条路是**走豁免**——相关性 ≥0.7 时，若新 alpha 的 Sharpe ≥ 冲突 alpha × 1.1 仍可过。我方池内最强 ACTIVE 已达 2.75，说明高 Sharpe 的拥挤信号确实能过关。`E560gqE1` 是败在「Sharpe 2.10 不够高」而不是「信号太像」。下一步应回到**能出高 Sharpe 的成熟信号族**（pv1 / fundamental6 / analyst4 / option8），把目标定在 2.5+ 去撞豁免线，而不是继续在低 Sharpe 的空白区里找。
+
+**工具**：`scripts/datasource_scan.py`（零仿真成本）新增「甜点区」=`userCount≥1500 ∩ 我方零使用`；`--min-cov` 控覆盖度、`--min-user` 控热度、`--show <kw>` 按 dataset 关键字查字段并打印 description。
