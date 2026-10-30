@@ -225,6 +225,15 @@ group_rank(ts_rank(free_cash_flow_reported_value / equity, 126), industry)
 
 -- 模板 F：资产周转 × 利润率（主信号 fundamental6：operating_income, sales, assets）
 rank(ts_rank(operating_income / sales * sales / assets, 126))
+
+-- 模板 G：期权 IV skew × 基本面质量【跨数据集：option + fundamental6/analyst4】★历史命中率最高
+-- ⚠️ 混合模板：不得用于套用用户给定的单一字段（必触发 4.1.1 混信号门槛）
+-- 腿1（期权）：rank(ts_mean((implied_volatility_call_180 - implied_volatility_put_180)/implied_volatility_mean_180, 5))
+-- 腿2（质量）：group_rank(ts_rank(operating_income/equity, 126), subindustry)
+-- 质量腿可换：free_cash_flow_reported_value/equity、cashflow_op/equity、enterprise_value/cashflow、enterprise_value/ebitda
+0.5 * rank(ts_mean((implied_volatility_call_180 - implied_volatility_put_180) / implied_volatility_mean_180, 5))
++ 0.5 * group_rank(ts_rank(operating_income / equity, 126), subindustry)
+-- decay=10~15, neutralization=SUBINDUSTRY, truncation=0.08
 ```
 
 **实测基线（2026-10-29，顾问账号 USA TOP3000 D1，各跑 1 次真实仿真）**
@@ -239,6 +248,32 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | F · 周转 × 利润率 | Xg9EA3Y0 | 1.08 | 0.50 | 6.9% | ✗ |
 
 两条可直接用的推论：① **双腿正交混合（D/E）的达标率显著高于单腿（A/B/C/F 全灭）**，在顾问门槛下混合应作为默认姿势而非进阶技巧；② **接近门槛时（B 差 0.01）先做参数邻域搜索，比新造模板的期望收益高得多**——新造模板首跑达标率 2/6，而 B 只需 decay / neutralization / window 微调。
+
+#### 4.1.3 历史库命中率（2026-10-30 统计，alpha_db.json 127 条，顾问门槛口径）
+
+「过门槛」= Sharpe ≥ 1.58 且 Fitness ≥ 1.0 且 1% ≤ TO ≤ 70%（不含相关性检查）。
+
+| 信号簇 | 尝试 | 过门槛 | 过门槛率 | 已 ACTIVE |
+|--------|-----:|------:|-------:|----------:|
+| **期权 IV（skew / pcr_oi）** | 16 | 10 | **62.5%** | 5 |
+| 分析师 EPS | 11 | 5 | 45.5% | 3 |
+| OI 质量（OI/equity、OI/liabilities） | 19 | 8 | 42.1% | 7 |
+| 现金流 / EV | 15 | 4 | 26.7% | 5 |
+| 其他（一次性探索） | 81 | 2 | 2.5% | 1 |
+
+结构维度：**双腿混合 24 次尝试 / 8 个 ACTIVE（33.3%） vs 单腿 103 次 / 6 个 ACTIVE（5.8%）**，双腿的命中率是单腿的 5.7 倍——与 A–F 首跑「双腿全过、单腿全灭」互相印证。
+
+> 复算命令：`python scripts/template_hitrate.py`（`--stock` 看过线存货，`--dup` 查重复仿真）。纯本地统计，**不联网、不消耗仿真额度**，可随时重跑。
+
+> ⚠️ **时效警告（2026-10-30 反证）**：上表的「过门槛率」是**各 alpha 首次仿真时点**的口径，样本集中在 2025-03～2026-08。它回答的是「哪个骨架当初容易做出达标信号」，**不等于「现在拿去跑还能达标」**。
+> 实测反证：把这批里 9 条已过线的存货全部重跑，Sharpe 平均 **−0.42**，9/9 全部掉线（唯一贴线的 `2rpzeGab` 从 2.37/1.88 掉到 1.63/1.00，卡在 `LOW_SUB_UNIVERSE_SHARPE` 0.70 vs 0.71）。**命中率表用于选骨架方向，不要用于估算当下的成功率。**
+
+**结论：内置模板里 E 首跑分数最高（1.81/1.24），但按历史过线率排序，模板 G（期权 IV skew × 基本面质量）才是产出可提交 alpha 概率最高的骨架**——它的 16 次尝试里 10 次直接过线，且三个 50/50 变体（+OI/equity、+FCF/equity）全部过线。
+
+**模板 G 的已占用情况（提交前必查，否则撞 SELF_CORRELATION）**：
+- 腿1（IV skew 180d）已在库内出现 12 次，ACTIVE 5 个（ZYE31mzx、XgoQMAq1、58p0232N、E5GO9zOG、bldLbe6R）。
+- 质量腿 `operating_income/equity` 与 `free_cash_flow_reported_value/equity` 已被占用；再跑同骨架必须**换质量腿**（`cashflow_op/equity`、`enterprise_value/ebitda`、`operating_income/liabilities`）或**换期权腿口径**（`implied_volatility_mean_skew_90`、`pcr_oi_270`、270/360 期限）。
+- `2rpzeGab` 与 `ZYE31mzx` 是**同一表达式**（仅 decay 10 vs 15）→ 重复仿真，勿再跑；用 `SimulationCache` 去重可避免此类浪费。
 
 ### 4.2 推荐默认设置
 
@@ -285,6 +320,23 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | ASI/JPN/HKG/TWN/KOR | Investability Sharpe：`maxtrade=ON`，或 `investability Sharpe > 原 Sharpe × 0.7` |
 | SuperAlpha | 门槛同 alpha，但 turnover 改为 **2% ≤ TO < 40%** |
 
+#### 5.1.2 Power Pool Alphas（低 Sharpe 通道，Sharpe ≥ 1.0 即可）
+
+来源：`GET /tutorial-pages/alpha-submission`（lastModified 2026-09-18）「Power Pool Alphas」章节。**这是顾问账号上 Sharpe 门槛最低的一条路径**，四类条件必须同时满足：
+
+| 条件 | 阈值 |
+|------|------|
+| Sharpe | **≥ 1.0**（远低于顾问常规的 1.58） |
+| 算子总数 | **≤ 8**（含重复算子；`ts_backfill` / `group_backfill` **不计入**） |
+| 唯一数据字段 | **≤ 3**（不含分组字段） |
+| Power Pool Correlation | **< 0.5**（比 SELF/PROD 的 0.7 更严） |
+
+分组字段（不计入字段数）：`country` `industry` `subindustry` `currency` `market` `sector` `exchange` `split` `adjfactor`。
+
+**实战含义**：简单表达式（`rank(ts_mean(...))`、`group_rank(ts_rank(x,N),subindustry)` 这类 2–3 字段结构）天然满足算子/字段约束，只要把 Sharpe 做到 1.0+ 且对 Power Pool 相关 < 0.5 就能进池。**当常规通道卡在 1.58 时，值得专门构造 ≤3 字段的极简版本走这条路。**
+
+**已验证的行为**：`POWER_POOL_CORRELATION` 在 alpha 的 `is.checks[]` 里**对合格候选出现**，但实测在 ACTIVE alpha 上**恒为 `PENDING`**（`is.powerPoolCorrelation` 也为 `None`）——平台在当前阶段并未回算该值。因此**不能**用它做提交前判据，只能按上面 4 条硬约束自行预筛。
+
 > 代码里用 `BrainSession.thresholds(delay)` 取阈值，它按账号权限自动在
 > `CONSULTANT_THRESHOLDS` / `STANDARD_THRESHOLDS` 之间切换。
 
@@ -302,8 +354,9 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 | **LOW_2Y_SHARPE** | 近 2 年 Sharpe ≥ 1.58（D1） | 近年失效 | 同上 |
 | **SELF_CORRELATION** | 0.7（信号级） | 与已提交 alpha 太像 | 换信号簇/换数据源；不要只调参数 |
 | **PROD_CORRELATION** | 0.7（对 PROD 池） | 与生产池太像 | 同上；顾问独有 |
+| **POWER_POOL_CORRELATION** | 0.5 | Power Pool 通道内相关性 | 见 §5.1.2；⚠️ 实测在 ACTIVE 上恒 `PENDING`，平台不回算，只能按复杂度约束自行预筛 |
 | DATA_DIVERSITY | 信息性/受限 | 数据源单一 | 引入新 dataset |
-| OLD_SIMULATION | — | 仿真过旧 | **重新模拟**后再提交 |
+| OLD_SIMULATION | — | 仿真过旧 | **重新模拟**后再提交。⚠️ 它同时是**掉线预警**：2026-10-30 实测 9 条 OLD_SIMULATION=FAIL 的存货全部重跑，Sharpe 平均 −0.42、9/9 全灭。看到它就别指望原指标，重跑前先按「大概率要重做」来规划 |
 | CLUSTER_TEST | Sharpe ≥ 1.58（KOR/JPS/TWN/HKG/IND/GBR/DEU ≥ 1） | 仅分类，不阻断 | 无影响（`ERROR` 也不阻断） |
 | MATCHES_PYRAMID / MATCHES_THEMES | multiplier | 仅加分项 | 无影响 |
 | OSMOSIS_ALLOCATION | — | 仅 WARNING | 无影响 |
@@ -798,7 +851,7 @@ GET https://api.worldquantbrain.com/tutorial-pages/<page_id>    # 正文（block
 1. **先生成因子前先拉取所有 ACTIVE alpha 的 PnL**，避免高相关重复。
 2. **相关性必须算日收益**，累计 PnL 相关会把所有因子看成同一个。
 3. **201 响应 ≠ 提交成功**：提交后必须确认 `status == ACTIVE`。
-4. **基本面 > 混合 > 技术**：`operating_income/equity`、`est_eps/close`、`free_cash_flow_reported_value/equity` 是最稳起点。
+4. **双腿混合 > 单腿**：`operating_income/equity`、`est_eps/close`、`free_cash_flow_reported_value/equity` 是最稳的**腿**，但单独用命中率只有 5.8%；两条正交腿相加的命中率 33.3%。单腿只作探索，不作交付形态。（2026-10-30 按 127 条历史库修正：原「基本面 > 混合 > 技术」的分类型排序误导，真正分层的维度是腿数，不是数据类型。）
 5. **group_rank + ts_rank 是黄金组合**。
 6. **SUBINDUSTRY 中性化通过率最高**。
 7. **Decay 是控制换手的主杠杆**：基本面 0，技术 10–30。
@@ -809,6 +862,7 @@ GET https://api.worldquantbrain.com/tutorial-pages/<page_id>    # 正文（block
 12. **阈值跟着账号走**：顾问账号 D1 要 Sharpe > 1.58（不是 1.25），并且多两道 `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE`；低换手（TO<30%）能让 IS Ladder 的 PASS 阈值打 0.85 折。
 13. **API 字段以 `OPTIONS /simulations` 为准**，文档正文可能是旧版（旧文档里的 `testPeriod`/`maxTrade` 已进 settings，而 `status` 在仿真进行中并不返回，只有 `progress`）。
 14. **额度是最硬约束**：所有成功仿真都计数（含多仿真子任务、重跑同一 alpha），必须用 hash 缓存去重。
+15. **先清点存货，但别信存货的旧指标**：`scripts/template_hitrate.py --stock` 能免费列出历史库里「曾过门槛但仍 UNSUBMITTED」的 alpha（2026-10-30 实测 9 条），值得先扫一遍；但**这些指标只在仿真当时成立**。实测把这 9 条按原样重跑，平均 −0.42 Sharpe、**9/9 全灭**。所以存货的正确用法是：拿它的**表达式当新因子的候选骨架**，而不是当成能直接提交的资产；只要 `OLD_SIMULATION=FAIL`，重跑就是要花额度的，且大概率掉线（见 §12 2026-10-30 第二条）。
 
 ---
 
@@ -969,4 +1023,62 @@ USA TOP3000 delay=1 实证结论：
 4. **未提交 alpha 上 `SELF_CORRELATION` 恒为 `PENDING`**，平台不计算。因此「模板是否值得进 few-shot」在物理上不可能依赖相关性——相关性只在提交动作后才被评估，且它是 **alpha 级**属性而非**模板级**（同一骨架换字段即可绕过）。判定「模板质量」时应显式排除 `SELF_CORRELATION` / `PROD_CORRELATION`。
 5. **IS checks 的实际返回集合比 `BLOCKING_CHECKS` 白名单更大**：实测出现 `CLUSTER_TEST`、`OSMOSIS_ALLOCATION`、`MATCHES_THEMES`、`MATCHES_PYRAMID`，均不在旧白名单内。用白名单做「是否达标」判定的实现会静默放行这些项的 FAIL。**正确做法：除相关性两项外，任何 `FAIL`/`ERROR` 都阻断；`WARNING` 不阻断但必须记录**（A 的 `CLUSTER_TEST` 实测为 WARNING，value 1.45 / limit 1.58）。
 6. **`CLUSTER_TEST` 在未提交 alpha 上也会给出数值**（本次 A 为 1.45，limit 1.58）。它是「与同簇 alpha 的相似度」的早期信号，可作为提交前低相关的辅助判据，但目前未纳入任何门禁。
+
+### 2026-10-30 — 历史库反查：哪个模板最容易产出可提交 alpha（127 条样本统计，零仿真消耗）
+
+依据：直接对本地 `alpha_db.json`（127 条：14 ACTIVE / 112 UNSUBMITTED / 1 REJECTED）按「顾问 D1 门槛（Sharpe ≥1.58、Fitness ≥1.0、1%≤TO≤70%）」重算，不动用任何仿真额度。完整表格见 §4.1.3。
+
+1. **命中率最高的簇是期权 IV，不是基本面**：期权 IV（skew / pcr_oi）16 次尝试 10 次过线（62.5%）；OI 质量 19 次 8 次（42.1%）；现金流/EV 15 次 4 次（26.7%）；一次性探索的其他 81 次仅 2 次（2.5%）。SKILL 此前把「基本面最稳」当第一起点，是**单腿口径下的结论**，在双腿口径下不成立。
+2. **腿数是比数据类型更强的分层变量**：双腿 24 次 / 8 ACTIVE（33.3%），单腿 103 次 / 6 ACTIVE（5.8%），相差 5.7 倍。A–F 首跑「双腿全过、单腿全灭」与历史库独立印证同一机制。
+3. **据此新增模板 G（期权 IV skew × 基本面质量）**，写入 §4.1.2。它是库内唯一「多个 50/50 变体全部过线」的骨架：+OI/equity → 2.37/1.89/7.7%（ACTIVE）；+FCF/equity → 2.01/1.57/9.4%（ACTIVE）；+OI/equity 换 decay → 2.37/1.88/9.3%（未提交）。
+4. **发现重复仿真**：`2rpzeGab` 与 `ZYE31mzx` 表达式完全相同（仅 decay 10 vs 15），属纯额度浪费——`SimulationCache` 的 hash 去重应在所有批量脚本里强制启用。
+5. **9 条「已过线但未提交」存货**（QPGkoVeX 2.16/1.77、pwNrKp3j 2.28/1.62、2rpzeGab 2.37/1.88、1YzMkAdM 1.96/1.37、O0GPG0RR 1.81/1.10、78zb2WGx 1.74/1.32、WjV5Mn5N 1.79/1.45、v27aYRz 1.72/1.04、d5ZVZg5w 1.61/1.19）。**产新 alpha 之前应先把这批提交掉**，零仿真成本；提交前跑 §7.2 护栏 2（信号成分重叠），其中多条共享同一 IV 腿，大概率互撞，按 Sharpe 从高到低只提交首个、同簇其余放弃。
+6. **口径提醒**：本节「过门槛」不含 `SELF_CORRELATION` / `PROD_CORRELATION`——这两项只在提交动作后才被平台计算，未提交 alpha 恒为 `PENDING`，因此历史库统计无法预知，只能靠护栏 2 提前拦。
+
+### 2026-10-30 — 存货重跑反证：9 条已过线存货全部掉线（消耗 9 次仿真）
+
+紧接上一条统计，把筛出的 9 条「已过顾问门槛但仍 UNSUBMITTED」的存货按原表达式、原 settings 全部重跑（单批多仿真 9 个，耗时 1m41s，额度 4991→4982）。
+
+| 原 id | 新 id | 旧 S / F | 新 S / F | ΔSharpe | 结论 |
+|---|---|---:|---:|---:|---|
+| 2rpzeGab | E560aaxm | 2.37 / 1.88 | 1.63 / 1.00 | −0.74 | 唯一指标过线，卡 `LOW_SUB_UNIVERSE_SHARPE` 0.70 vs 0.71 |
+| pwNrKp3j | gJeqPP0J | 2.28 / 1.62 | 2.01 / 1.22 | −0.27 | `CONCENTRATED_WEIGHT` 0.154>0.1 + Sub-Universe FAIL |
+| QPGkoVeX | MPYl8829 | 2.16 / 1.77 | 1.55 / 1.02 | −0.61 | `LOW_SHARPE` + Sub-Universe FAIL |
+| 1YzMkAdM | npvkzzX3 | 1.96 / 1.37 | 1.59 / 0.90 | −0.37 | `LOW_FITNESS`（WARNING 级）0.90 < 1.0 |
+| O0GPG0RR | RREZaavz | 1.81 / 1.10 | 1.56 / 0.82 | −0.25 | Sharpe/Fitness/集中度/Sub-Universe 全 FAIL |
+| WjV5Mn5N | KPJY88pl | 1.79 / 1.45 | 1.36 / 0.85 | −0.43 | 双指标 FAIL |
+| 78zb2WGx | leA6zzY2 | 1.74 / 1.32 | 1.26 / 0.76 | −0.48 | 双指标 + Sub-Universe FAIL |
+| v27aYRz | bl62PPgq | 1.72 / 1.04 | 1.44 / 0.74 | −0.28 | 双指标 FAIL |
+| d5ZVZg5w | E560aaMm | 1.61 / 1.19 | 1.26 / 0.79 | −0.35 | 双指标 + `LOW_2Y_SHARPE` 1.57 vs 1.58 |
+
+1. **「存货」是伪资产**：历史库里 Sharpe/Fitness 只在**仿真当时**成立。9 条重跑平均 −0.42 Sharpe、无一存活，说明平台在这 3 个月里延长了 IS 窗口 / 加入了新数据，而这些都是 2026-08 前的旧信号。
+2. **`OLD_SIMULATION` 是掉线预警而非手续问题**：它不只是「需要重跑一下」，而是强预测「重跑就掉」。现在把它写进 §5.2。
+3. **相关性豁免测算全部不成立**：即便把指标修好，9 条的最强冲突 ACTIVE 分别为 Gre2WN65（2.75）、ZYE31mzx（2.37）、9q7nYrZe（2.02）、gJ8kN8kl（1.68），豁免要求新 Sharpe ≥ 冲突 × 1.1，最高的 E560aaxm（1.63）需 ≥ 3.03，全部不可能满足。
+4. **ROE 腿是池内最脏的组件**：护栏 2 对 `group_rank(ts_rank(operating_income/equity,126),subindustry)` 命中 12 个 ACTIVE，最强者 Sharpe 2.75。含这条腿的新 alpha 除非自身 Sharpe 能到 3.0+，否则一律别提交。
+5. **`IS_LADDER_SHARPE` 的 PASS 阈值确认会打折**：E560aaxm TO=9.1% < 30%，其 limit 实测 2.02 而非 2.22（≈2.38×0.85），与 §5.2.1 一致；`CLUSTER_TEST` 在其上给出 0.63（WARNING），可作为同簇相似度的早期读数。
+6. **结论修正**：不要再把「历史过线存货」当作低成本提交来源。真正低成本的路径是——用命中率最高的**骨架**（仍是双腿混合，模板 G 的结构）**换新腿/新字段重新构造**，而不是复用旧表达式。
+
+### 2026-10-30 — 门槛核对：数值未提高，但发现 Power Pool 低门槛通道
+
+用户提出「已是正式顾问，门槛可能被提高」，用实时数据核了一遍。**结论：常规门槛一个数字都没变，真正的新东西是 Power Pool。**
+
+**验证方法**：`GET /alphas/{id}` 的 `is.checks[].limit` 是权威值（不是文档、不是 SKILL 记忆）。取自当天重跑的三个 USA TOP3000 D1 alpha：
+
+| 检查项 | 实测 limit | SKILL 旧值 | 是否变化 |
+|---|---:|---:|:---:|
+| LOW_SHARPE | 1.58 | 1.58 | 未变 |
+| LOW_FITNESS | 1.0 | 1.0 | 未变 |
+| LOW_TURNOVER / HIGH_TURNOVER | 0.01 / 0.70 | 同 | 未变 |
+| CONCENTRATED_WEIGHT | 0.1 | 0.1 | 未变 |
+| CLUSTER_TEST | 1.58 | 1.58 | 未变 |
+| LOW_2Y_SHARPE | 1.58 | 1.58 | 未变 |
+| IS_LADDER_SHARPE | 2.02（TO 9.1% → 2.38×0.85）/ 1.58 | 与 §5.2.1 一致 | 未变 |
+
+附带确认：`LOW_SUB_UNIVERSE_SHARPE` 的 limit 确实是 `0.75·√(1000/3000)·Sharpe = 0.433·Sharpe`（E560aaxm：0.433×1.63=0.71，实测 limit 0.71 ✓），即**抬高 Sharpe 会同步抬高它的门槛**，不能靠提 Sharpe 硬冲。
+
+**新增（文档来源 `alpha-submission`，2026-09-18）**：Power Pool Alphas 通道，Sharpe 只要 **≥ 1.0**，代价是 ≤8 算子、≤3 唯一字段、Power Pool Correlation < 0.5。已写入 §5.1.2 与 §5.2。
+
+**实测行为**：`POWER_POOL_CORRELATION` 在 22 个 ACTIVE 中的 9 个上出现，但**全部 `PENDING`**，`is.powerPoolCorrelation` 为 `None`。所以它现在不能当判据，只能按 4 条硬约束自己预筛。
+
+**对「门槛提高」这个问题的直接回答**：数值没提高，但**有效门槛确实在上升**，机制是两个——① 信号随时间衰减（9 条存货平均 −0.42 Sharpe）；② 自己的 ACTIVE 池越厚，SELF_CORRELATION 越难过（豁免要求新 Sharpe ≥ 冲突 × 1.1，池里最强已到 2.75，等于要求新 alpha 做到 3.03）。**这是"池子变挤"，不是"分数线变高"。**
 
