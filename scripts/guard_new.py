@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import argparse
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -78,12 +79,20 @@ def signal_overlap(cand: str, active: dict[str, str]) -> list[str]:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="", help="只处理名字含该子串的候选")
+    ap.add_argument("--glob", default="opt_exempt_results.json",
+                    help="候选结果文件 glob（默认 exempt 轮）")
+    args = ap.parse_args()
+
     brain = BrainSession()
     brain.authenticate()
 
     cands = []
-    for res_file in sorted((REPO / ".workbuddy").glob("opt_ivskew_results*.json")):
+    for res_file in sorted((REPO / ".workbuddy").glob(args.glob)):
         cands.extend(json.loads(res_file.read_text(encoding="utf-8")))
+    if args.only:
+        cands = [c for c in cands if args.only in c.get("name", "")]
     print(f"载入候选 {len(cands)} 条")
 
     act = {}

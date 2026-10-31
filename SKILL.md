@@ -349,6 +349,25 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 
 **已验证的行为**：`POWER_POOL_CORRELATION` 在 alpha 的 `is.checks[]` 里**对合格候选出现**，但实测在 ACTIVE alpha 上**恒为 `PENDING`**（`is.powerPoolCorrelation` 也为 `None`）——平台在当前阶段并未回算该值。因此**不能**用它做提交前判据，只能按上面 4 条硬约束自行预筛。
 
+> **⚠️ 实测修正（2026-10-31，首批 10 候选全量仿真 + 提交实测）**
+> 1. **`build_payload(sim_type="POWER_POOL")` 直接 400**：`{"type":["Object with name=POWER_POOL does not exist."]}`。
+>    仿真 `type` 只能是 `"REGULAR"`，**Power Pool 不是合法的 `type` 值**，不能靠设 type 进 PP 通道。
+> 2. **提交 REGULAR alpha（Sharpe 落在 [1.0,1.58)）会被 REGULAR 门槛挡下**：403 body 里
+>    `LOW_SHARPE` 的 limit 仍是 **1.58**（不是 PP 的 1.0），且 `POWER_POOL_CORRELATION` 保持
+>    **PENDING（永不被计算）**。即平台**不会自动把 1.0–1.58 的 alpha 路由到 PP**，必须显式触发
+>    PP 提交上下文（疑似走 theme/competition 或带 `description` 的特定提交；403 里出现
+>    `POWER_POOL_DESCRIPTION_LENGTH`/`POWER_POOL_DESCRIPTION_FORMAT` 两个 PP 专属 WARNING，
+>    暗示 PP 提交需要填描述）。**PP 的准确提交触发方式尚未完全查清，需进一步验证。**
+> 3. **`model51` 字段（如 `unsystematic_risk_last_360_days`）双杀**：实测提交出现
+>    `CONCENTRATED_WEIGHT` FAIL（None/None）+ `LOW_COVERAGE` FAIL（value=17, limit=5），
+>    **常规与 PP 两条通道都过不去**。PP 候选避开 model51。
+> 4. **单腿「未饱和」基本面/分析师在 USA TOP3000 上打不到 1.0**：首批 9 条非 model51 候选
+>    Sharpe 仅 0.09–0.92（F4 `anl4_ebitda_value/debt` 最高 0.92，仍 <1.0）；唯一 ≥1.0 的是
+>    model51（1.44，但被第 3 点双杀）。能稳定 ≥1.0 的单腿几乎都是**已饱和族**
+>    （`operating_income/equity`≈1.23、IV skew 1.5+），但那些又撞 SELF/PP 相关。
+>    ⇒ 想用 ≤3 字段达到 PP 的 Sharpe≥1.0，**更靠谱的是 ≤3 字段的双腿正交混合**（见 §10 双腿 33% 命中率），
+>    而非单腿未饱和信号——单腿未饱和信号普遍卡在 0.6–0.9。
+
 > 代码里用 `BrainSession.thresholds(delay)` 取阈值，它按账号权限自动在
 > `CONSULTANT_THRESHOLDS` / `STANDARD_THRESHOLDS` 之间切换。
 
@@ -1181,3 +1200,36 @@ REGULAR_SUBMISSION PASS   value=0      limit=4      ← 配额根本没用完
 **由此产生的策略修正（重要）**：既然 `PROD_CORRELATION` 既不可预测也难以靠换源规避，另一条路是**走豁免**——相关性 ≥0.7 时，若新 alpha 的 Sharpe ≥ 冲突 alpha × 1.1 仍可过。我方池内最强 ACTIVE 已达 2.75，说明高 Sharpe 的拥挤信号确实能过关。`E560gqE1` 是败在「Sharpe 2.10 不够高」而不是「信号太像」。下一步应回到**能出高 Sharpe 的成熟信号族**（pv1 / fundamental6 / analyst4 / option8），把目标定在 2.5+ 去撞豁免线，而不是继续在低 Sharpe 的空白区里找。
 
 **工具**：`scripts/datasource_scan.py`（零仿真成本）新增「甜点区」=`userCount≥1500 ∩ 我方零使用`；`--min-cov` 控覆盖度、`--min-user` 控热度、`--show <kw>` 按 dataset 关键字查字段并打印 description。
+
+### 2026-10-31 — 豁免路径实跑：本账户已饱和，IS 与相关性互斥
+
+用户要求「按豁免路径起一轮」：克隆 proven 高 Sharpe 结构（Gre2WN65 估值+质量 S=2.75、bldLbe6R 4 腿 S=2.22），换掉饱和腿 + 扫 neut/decay，目标撞 1.1× 豁免线。新增 `scripts/opt_exempt.py`（10 候选，batch_size=1 防连坐），跑两轮共 ~10 次有效仿真。
+
+**结果（IS 检查 + 日收益 proxy 相关）：**
+
+| 候选 | S | F | TO | IS | 最大 proxy 相关 | 结论 |
+|---|---:|---:|---:|:--:|---|---|
+| A1 EV/cf+FCF/eq IND d0 | 1.47 | 0.79 | 15.0% | ✗ | 0.651 (Gre2WN65 2.75) | 换腿掉线 |
+| A2 EV/cf+FCF/eq SEC d4 | 1.06 | 0.59 | 7.6% | ✗ | — | 换腿掉线 |
+| A3 EV/cf+FCF/liab IND d0 | 1.40 | 0.75 | 14.8% | ✗ | 0.635 | 换腿掉线 |
+| **B1 4leg IND d0** | **2.12** | 1.29 | 26.6% | ✅ | **0.973** (bldLbe6R 2.22) | 需≥2.44 |
+| B2 4leg EV/cf SEC d4 | 1.55 | 1.17 | 13.7% | ✗ | 0.919 | 掉线+相关 |
+| B3 3leg SEC d4 | 1.24 | 0.85 | 9.2% | ✗ | 0.732 | 掉线+相关 |
+| **C1 eps/close+FCF/liab IND d0** | **2.01** | 1.32 | 17.7% | ✅ | **0.810/0.798/0.750** | 需≥2.44/2.22/2.48 |
+| C2 ROE/close+analyst SEC d4 | 0.90 | 0.54 | 5.8% | ✗ | 0.837 | 掉线+相关 |
+| C3 (cf-capex)/close+FCF/eq SUBIND | 1.48 | 0.83 | 15.8% | ✗ | 0.807 | 掉线+相关 |
+| C4 4leg fresh SEC d4 | 1.56 | 1.16 | 14.6% | ✗ | 0.848 | 掉线+相关 |
+
+**三条铁律：**
+
+1. **OI/equity 腿不可替换**。A 组把质量腿换成 FCF/equity / FCF/liab，Sharpe 直接塌到 1.06–1.47——`operating_income/equity` 才是 Sharpe 引擎，不是可替换组件。
+2. **est_eps/close 家族能出清洁 IS passer（B1=2.12 / C1=2.01 全过），但它是 bldLbe6R 的克隆**——B1 与 bldLbe6R 日收益相关 **0.973**（仅 decay 0 vs 4）、C1 与三个 est_eps/close 家族 alpha 相关 0.75–0.81。豁免需 Sharpe ≥ 冲突 × 1.1 = 2.22×1.1 = **2.44**，两条都差 0.3+。
+3. **IS 过线与相关性过线在本账户互斥**。达到 S≥1.58 的两条（B1/C1）必然 ≥0.7 相关；相关性 <0.7 的（A1/A3，proxy 0.63–0.65）必然 S<1.58。中间没有「既过 IS 又 <0.7」的甜点区。叠加 proxy 低估 selfCorrelation ~0.11（E560gqE1 实证：proxy 0.509 vs 实测 SELF 0.623）真实相关更高，甜点区更窄。
+
+**根因**：本账户 22 条 ACTIVE 已覆盖两大引擎（OI/equity 9 条、est_eps/close 4 条）及其卫星腿（FCF/liab、ROE/close、动量、-liab/assets、IV skew）。任何基于这些引擎的新 alpha 都 ≥0.7 相关，且无法超越被克隆的冠军（2.22–2.75）的 1.1 倍。换空白数据源（第 3/4 轮）最高只到 1.16，连 IS 都过不了。**结论：本账户在已知家族内已饱和，增量提交期望收益≈0。**
+
+**可行出路（未验证，留给下一轮）：**
+- 唯一的数学可能是在 OI/equity/est_eps/close 之外找到**第三个高 Sharpe 引擎**且该引擎在本池无人使用——第 3/4 轮未找到（最高 1.16），需要更系统的因子挖掘而非字段排列。
+- 或接受饱和现实，停止在本账户增量提交，转去**挖掘全新数据源的慢信号**（analyst 全文、供应链、另类数据），这类在第 4 轮甜点区里 `anl4_*` 数值字段（分歧/覆盖度）相关最低（0.5 档），是相对不拥挤的方向，但需要更长回看窗口和更精细的构造。
+
+**工具更新**：`scripts/guard_new.py` 增加 `--glob`（默认 `opt_exempt_results.json`）与 `--only` 过滤，可对任意一轮候选跑双层护栏；`scripts/opt_exempt.py` 在 `run_many` 后加了空 alpha_id 重试兜底（偶发 API 返回空 id）。`scripts/exempt_scan.py` 把 22 条 ACTIVE 按 Sharpe 排序、输出结构特征到 `.workbuddy/active_structures.json`，是豁免路径的零成本起点。
