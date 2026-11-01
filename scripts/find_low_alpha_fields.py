@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""搜索低 alphaCount 但有经济学意义的字段，用于 F1c 模板。
+"""⚠️ DEPRECATED：请使用 recommend_fields.py 替代。
+
+本脚本保留仅作历史参考，功能已被 recommend_fields.py 完全覆盖：
+- recommend_fields.py 支持多区域懒加载
+- 自动剔除 ACTIVE 池已用字段
+- 按 11 个经济学维度分组
+- 强制在线模式
+
+搜索低 alphaCount 但有经济学意义的字段，用于 F1c 模板。
 
 1. 从本地 USA TOP3000 delay=1 字段快照中筛选
 2. 从 BRAIN API 拉 GLB TOP3000 delay=1 字段（新数据集）

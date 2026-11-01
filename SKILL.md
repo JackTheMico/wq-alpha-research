@@ -9,10 +9,33 @@ description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expres
 
 ---
 
+## ⚠️ 硬性声明：构造 alpha 前必须运行 recommend_fields.py
+
+**任何 alpha 表达式的构造，第一步必须是运行 `recommend_fields.py` 获取低拥挤字段池。**
+
+```bash
+python scripts/recommend_fields.py --region <region> --universe <universe>
+```
+
+**原因**：直接使用常见高 alphaCount 字段（如 `operating_income/equity`、`est_eps`、`implied_volatility_*`）会导致 alpha 反复卡在 PROD_CORRELATION < 0.7 的闸门，浪费仿真额度。从低拥挤字段池中选择信号字段是从源头降低撞墙概率的唯一有效手段。
+
+**规则**：
+1. 信号字段必须从 `recommend_fields.py` 输出中选取
+2. 每个信号字段必须能写出一句话经济学解释（`simulate_batch.py --field-rationale` 强制校验）
+3. 仿真前 `simulate_batch.py` 会自动检查字段拥挤度，高 alphaCount 字段会被拒绝
+4. 模板 A–G 中的示例字段仅演示语法，**直接使用会撞 PROD_CORRELATION**
+
+详见 §4.2「低拥挤字段优先策略」。
+
+---
+
 ## 1. 快速决策树
 
 ```
 开始
+  └── Step 0: 运行 recommend_fields.py 获取低拥挤字段池
+              python scripts/recommend_fields.py --region <r> --universe <u>
+              └── 从输出中按经济学维度选择信号字段
   ├── 拉取所有 alpha 列表 ──→ 只看 ACTIVE；算 **日收益** 相关，>0.7 则修改或放弃
   ├── 设计新因子
   │    ├── 字段已验证？ ──否──→ 查第 2 节（本地字段文件搜索 / 模拟 rank(field)）
@@ -31,9 +54,11 @@ description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expres
 
 本 SKILL 已内置 USA TOP3000 delay=1 的完整字段列表（共 4367 个），无需每次从网页/ API 拉取：
 
-- `references/wq_usa_top3000_delay1_data_fields.json`：完整字段元数据数组
-- `references/wq_usa_top3000_delay1_data_fields.csv`：CSV 版，方便 Excel/ pandas 查看
+- `references/fields_usa_top3000_delay1.json`：完整字段元数据数组
+- `references/fields_index.json`：多区域快照索引
 - `references/wq_usa_top3000_delay1_data_fields_summary.json`：分类统计与示例字段
+
+> **首选方式**：直接运行 `recommend_fields.py` 获取按维度分组的低拥挤字段池，无需手动搜索。手动搜索仅用于补充验证。
 
 字段分布：
 
@@ -57,7 +82,7 @@ from pathlib import Path
 # 假设在 skill 目录下运行；如在其他位置，改为实际路径
 skill_dir = Path(".")
 field_dir = skill_dir / "references"
-data = json.loads((field_dir / "wq_usa_top3000_delay1_data_fields.json").read_text(encoding="utf-8"))
+data = json.loads((field_dir / "fields_usa_top3000_delay1.json").read_text(encoding="utf-8"))
 
 keyword = "operating_income"
 matches = [
@@ -72,11 +97,14 @@ for f in matches[:10]:
 
 ### 2.2 按类别筛选
 
+> **默认按 alphaCount 升序排列**，优先查看低拥挤字段。
+
 ```python
 category = "pv"  # 或 fundamental / analyst / news / option / model / socialmedia
 fields = [f for f in data if f.get("category", {}).get("id") == category]
 print(f"{category}: {len(fields)} fields")
-for f in sorted(fields, key=lambda x: x.get("alphaCount", 0), reverse=True)[:10]:
+# 按 alphaCount 升序（低拥挤优先）
+for f in sorted(fields, key=lambda x: x.get("alphaCount", 0))[:10]:
     print(f"  {f['id']} | alphaCount={f.get('alphaCount')} | coverage={f.get('coverage')}")
 ```
 
@@ -155,7 +183,7 @@ from pathlib import Path
 
 API_BASE = "https://api.worldquantbrain.com"
 # 按实际部署位置调整；skill 目录内为相对 references/ 路径
-FIELDS_JSON = Path("/path/to/wq-alpha-research/references/wq_usa_top3000_delay1_data_fields.json")
+FIELDS_JSON = Path("/path/to/wq-alpha-research/references/fields_usa_top3000_delay1.json")
 
 def load_field_datasets():
     data = json.loads(FIELDS_JSON.read_text(encoding="utf-8"))
@@ -202,37 +230,37 @@ if not ok:
 
 #### 4.1.2 模板库（已标注 dataset）
 
+> ⚠️ **模板中的信号字段均为低拥挤字段示例，未经 Sharpe 验证，仅演示填充方式。**
+> 请运行 `recommend_fields.py` 获取最新低拥挤字段池，按同维度替换。
+
 ```fastexpr
--- 模板 A：ROE 趋势（主信号 fundamental6：operating_income, equity）
--- ⚠️ 旧注「通过率最高」指的是「最不容易报错、最容易跑出结果」，**不是**「能过顾问门槛」。
---    2026-10-29 USA TOP3000 D1 实测：Sharpe 1.23 / Fitness 0.58，未过 1.58 / 1.0。
-group_rank(ts_rank(operating_income / equity, 126), subindustry)
+-- 模板 A：盈利能力趋势（主信号：comprehensive_income_net_tax, deferred_tax_liabilities_total_4）
+-- ⚠️ 示例字段 alphaCount 极低，仅演示结构。请从 recommend_fields.py 选择同维度字段。
+group_rank(ts_rank(comprehensive_income_net_tax / deferred_tax_liabilities_total_4, 126), subindustry)
 
--- 模板 B：EPS 收益率修正（主信号 analyst4：est_eps；close 为 pv1 价格基准）
-group_rank(ts_rank(est_eps / close, 126), industry)
+-- 模板 B：收益率修正（主信号：option_exercise_avg_price_period；close 为价格基准）
+group_rank(ts_rank(option_exercise_avg_price_period / close, 126), industry)
 
--- 模板 C：FCF 收益率（主信号 analyst4：free_cash_flow_reported_value；equity 为规模基准）
-group_rank(ts_rank(free_cash_flow_reported_value / equity, 126), industry)
+-- 模板 C：偿债能力（主信号：debt_repayments_total_2；equity 为规模基准）
+group_rank(ts_rank(debt_repayments_total_2 / equity, 126), industry)
 
--- 模板 D：多因子混合（高 Fitness）【跨数据集：fundamental6 + analyst4】
+-- 模板 D：多因子混合（高 Fitness）【跨数据集】
 -- ⚠️ 混合模板：不得用于套用用户给定的单一字段（必触发 4.1.1 混信号门槛）
-0.5 * group_rank(ts_rank(operating_income / equity, 126), subindustry)
-+ 0.5 * group_rank(ts_rank(est_eps / close, 126), industry)
+0.5 * group_rank(ts_rank(comprehensive_income_net_tax / deferred_tax_liabilities_total_4, 126), subindustry)
++ 0.5 * group_rank(ts_rank(option_exercise_avg_price_period / close, 126), industry)
 
--- 模板 E：低相关技术+基本面混合【跨数据集：pv1 + fundamental6】
+-- 模板 E：低相关技术+基本面混合【跨数据集】
 -- ⚠️ 混合模板：同上，不得用于套用用户字段
-0.5 * rank(-(close / open - 1)) + 0.5 * rank(ts_rank(operating_income / equity, 126))
+0.5 * rank(-(close / open - 1)) + 0.5 * rank(ts_rank(comprehensive_income_net_tax / deferred_tax_liabilities_total_4, 126))
 
--- 模板 F：资产周转 × 利润率（主信号 fundamental6：operating_income, sales, assets）
-rank(ts_rank(operating_income / sales * sales / assets, 126))
+-- 模板 F：资产周转 × 利润率（主信号：comprehensive_income_net_tax, sales, assets）
+rank(ts_rank(comprehensive_income_net_tax / sales * sales / assets, 126))
 
--- 模板 G：期权 IV skew × 基本面质量【跨数据集：option + fundamental6/analyst4】★历史命中率最高
--- ⚠️ 混合模板：不得用于套用用户给定的单一字段（必触发 4.1.1 混信号门槛）
--- 腿1（期权）：rank(ts_mean((implied_volatility_call_180 - implied_volatility_put_180)/implied_volatility_mean_180, 5))
--- 腿2（质量）：group_rank(ts_rank(operating_income/equity, 126), subindustry)
--- 质量腿可换：free_cash_flow_reported_value/equity、cashflow_op/equity、enterprise_value/cashflow、enterprise_value/ebitda
-0.5 * rank(ts_mean((implied_volatility_call_180 - implied_volatility_put_180) / implied_volatility_mean_180, 5))
-+ 0.5 * group_rank(ts_rank(operating_income / equity, 126), subindustry)
+-- 模板 G：事件 × 盈利能力【跨数据集】
+-- 腿1（事件）：rank(ts_mean(news_dividend_yield, 5))
+-- 腿2（盈利）：group_rank(ts_rank(comprehensive_income_net_tax / deferred_tax_liabilities_total_4, 126), subindustry)
+0.5 * rank(ts_mean(news_dividend_yield, 5))
++ 0.5 * group_rank(ts_rank(comprehensive_income_net_tax / deferred_tax_liabilities_total_4, 126), subindustry)
 -- decay=10~15, neutralization=SUBINDUSTRY, truncation=0.08
 ```
 
@@ -278,7 +306,65 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 > ⚠️ **换期权腿的期限/口径都不足以逃出这个簇（2026-10-30 实测 20 次仿真反证）**：把 IV 腿分别换成 90 / 120 / 270 天期限的 call-put skew、`implied_volatility_mean_skew_270/360`、`pcr_oi_270`，与池内纯 IV 腿 alpha `58p0232N` 的日收益相关仍在 **0.70–0.81**，与 `ZYE31mzx` 0.61–0.67，与 `XgoQMAq1` 0.55–0.94。原因是 SELF_CORRELATION 看的是**信号族**，不是字段串——同一个经济含义（期权 skew）换期限只是换个采样窗口。
 > **结论：模板 G 在当前池里已经饱和，继续在 IV 簇里换字段是无效工作量。要留在「双腿混合」骨架上，第二腿必须换到池外数据族**（pv1 价量反转 / news / socialmedia / model）。实测 pv1 反转腿 `rank(-(close/open-1))` 在 22 个 ACTIVE 中无人使用，配 `cashflow_op/equity` 后与池内最大相关仅 0.509。
 
-### 4.2 推荐默认设置
+### 4.2 低拥挤字段优先策略
+
+**核心目标**：从源头降低 PROD_CORRELATION 撞墙概率。
+
+#### 4.2.1 字段拥挤度分层
+
+| 层级 | alphaCount | 用法 |
+|------|-----------|------|
+| 🟢 首选 | 0–100 | 优先填入模板信号槽位 |
+| 🟡 回退 | 100–500 | 首选不足时使用 |
+| 🔴 饱和 | > 500 | 仅作分母/分组基准，不作主信号 |
+
+#### 4.2.2 三道筛选闸门（`recommend_fields.py` 自动执行）
+
+1. **拥挤度**：`alphaCount ≤ 500`
+2. **数据可靠性**：`coverage ≥ 0.7` 且 `type == MATRIX`
+3. **经济学可解释性**：AI 必须为每个信号字段写出一句话经济学解释
+
+**粗筛排除**：
+- 衍生信号字段：id/description 含 `rank`/`percentile`/`score`/`signal`/`factor`/`zscore`/`normalized`/`standardized`/`decay`/`neutralized`/`adjusted`
+- 饱和数据集：`fundamental6`、`analyst4`、`pv1`
+
+**极冷门标记**：`userCount < 100` 且 `alphaCount < 5` 的字段标记为「极高不确定性」，不作首选。
+
+#### 4.2.3 11 个经济学维度
+
+`recommend_fields.py` 按以下维度分组输出，便于按模板槽位语义选字段：
+
+| 维度 | 语义 |
+|------|------|
+| profitability | 盈利能力 |
+| growth | 成长性 |
+| valuation | 估值 |
+| leverage | 杠杆/偿债 |
+| cashflow | 现金流 |
+| efficiency | 运营效率 |
+| analyst | 分析师预期 |
+| volatility | 波动率 |
+| sentiment | 情绪/舆情 |
+| momentum | 价量动量/反转 |
+| event | 特殊事件 |
+
+#### 4.2.4 强制在线模式
+
+`recommend_fields.py` 必须拉取当前区域的 ACTIVE alpha 列表，剔除已用字段。无凭据时报错退出，不降级到离线模式。
+
+#### 4.2.5 仿真前静态检查
+
+`simulate_batch.py` 仿真前自动检查：
+- 信号字段 alphaCount > 500 → 拒绝（`--allow-crowded` 豁免）
+- 信号字段在 ACTIVE 池中 → 拒绝
+- 缺少 `--field-rationale` 或解释 < 10 字 → 拒绝
+- 字段不在快照中 → 拒绝（`--allow-unknown-field` 豁免）
+
+#### 4.2.6 快照有效期
+
+字段快照超过 30 天未更新时输出警告。运行 `--refresh` 手动更新。支持多区域按需懒加载。
+
+### 4.3 推荐默认设置
 
 | 因子类型 | Decay | Neutralization | Truncation | nanHandling | 预期 TO |
 |----------|-------|----------------|------------|-------------|---------|
@@ -347,17 +433,36 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 
 **实战含义**：简单表达式（`rank(ts_mean(...))`、`group_rank(ts_rank(x,N),subindustry)` 这类 2–3 字段结构）天然满足算子/字段约束，只要把 Sharpe 做到 1.0+ 且对 Power Pool 相关 < 0.5 就能进池。**当常规通道卡在 1.58 时，值得专门构造 ≤3 字段的极简版本走这条路。**
 
+**官方文档中另外三条容易漏读的规则（`GET /tutorial-pages/alpha-submission` 原文，2026-10-31 复核）**：
+
+1. **相关性不是硬否决，是可补偿的**：原文 "If the Power Pool correlation is > 0.5, the Alpha must have a Sharpe at least 10% higher than the most correlated Alpha to be considered eligible for submission." —— 即 PP 相关 0.5 只是默认线，只要 Sharpe 比**最相关那个 alpha 高出 10%** 仍可提交。构造候选时若 PP 相关落在 0.5–0.7，不要直接放弃，先算这条。
+2. **tag 不可逆**：原文 "Once you tag an Alpha as power pool, it stays in the self-correlation pool even if you untag it later." —— 给 alpha 打 PP tag 是单向门，打错就永久污染 self-correlation 池。**只对确定要投 PP 的候选打 tag，绝不在试验品上打。**
+3. **theme 决定 eligibility**：原文 "Eligible region, delay, universe and other conditions (risk neutralization, datasets, turnover ranges, etc) are defined by the active Power Pool theme (e.g. GLB/D1, All regions/D0, EUR/D1 Fast Factors)." —— 字段数/算子数只是必要项，region/delay/universe/中性化还必须命中**当前活跃 theme**，否则 checks 里 `MATCHES_THEMES` 会 WARNING。
+
+#### 5.1.3 PP 候选的构造准则：(A − B) / mean(A, B) 结构
+
+这是 ≤3 字段约束下**唯一能稳定把 Sharpe 推到 1.0 以上**的形状，来自对 IV skew（单腿 Sharpe 1.55–1.60）的解剖：
+
+```
+(A − B) / mean(A, B)          # 3 字段、4 算子，天然合规
+```
+
+- `A` / `B` 是**同源的反向分量对**（call vs put、up vs down、high vs low），分子做差分取方向，分母取两者均值做归一化。
+- 分母与分子同源是这个结构的关键：`implied_volatility_mean_180` 的官方描述就是 "The average of IvCall180 and IvPut180"。同源归一化让指标天然有界、噪声自消，于是 turnover 低、回撤小、排序稳定。
+- **反例**：单比率 `a/b`、单字段 `rank(x)`、异源分母 `x/close` —— 这类形状在 USA TOP3000 上实测 Sharpe 普遍落在 0.6–0.9（§5.1.2 首批 9 条非 model51 候选：0.09–0.92），够不到 PP 的 1.0。
+- **推论**：优化 PP 候选时，先问「我的 3 个字段构不构成一个正向分量对 + 一个同源归一化分母」。若不构成，换窗口/换期限是无效劳动（§12 已用 7 次仿真证伪：同族换期限相关仍 0.70–0.94，Sharpe 也不会质变）。
+- **换族而非换参数**：IV 族的这个形状已被本池 `58p0232N`（`rank(ts_mean(同一 skew,5))`，S=1.55）占位，再做任何 IV skew 变体都撞 PP 相关。正确动作是保住形状、换数据族。
+
 **已验证的行为**：`POWER_POOL_CORRELATION` 在 alpha 的 `is.checks[]` 里**对合格候选出现**，但实测在 ACTIVE alpha 上**恒为 `PENDING`**（`is.powerPoolCorrelation` 也为 `None`）——平台在当前阶段并未回算该值。因此**不能**用它做提交前判据，只能按上面 4 条硬约束自行预筛。
 
 > **⚠️ 实测修正（2026-10-31，首批 10 候选全量仿真 + 提交实测）**
 > 1. **`build_payload(sim_type="POWER_POOL")` 直接 400**：`{"type":["Object with name=POWER_POOL does not exist."]}`。
 >    仿真 `type` 只能是 `"REGULAR"`，**Power Pool 不是合法的 `type` 值**，不能靠设 type 进 PP 通道。
-> 2. **提交 REGULAR alpha（Sharpe 落在 [1.0,1.58)）会被 REGULAR 门槛挡下**：403 body 里
->    `LOW_SHARPE` 的 limit 仍是 **1.58**（不是 PP 的 1.0），且 `POWER_POOL_CORRELATION` 保持
->    **PENDING（永不被计算）**。即平台**不会自动把 1.0–1.58 的 alpha 路由到 PP**，必须显式触发
->    PP 提交上下文（疑似走 theme/competition 或带 `description` 的特定提交；403 里出现
->    `POWER_POOL_DESCRIPTION_LENGTH`/`POWER_POOL_DESCRIPTION_FORMAT` 两个 PP 专属 WARNING，
->    暗示 PP 提交需要填描述）。**PP 的准确提交触发方式尚未完全查清，需进一步验证。**
+> 2. **~~平台不会自动路由到 PP，触发方式未查清~~ → 已查清：靠 alpha 的 `POWER_POOL` tag**
+>    （2026-10-31 补测，见下方 §5.1.4）。**不带 tag 提交时 checks 里根本没有
+>    `POWER_POOL_CORRELATION` 这一项**，`LOW_SHARPE` 直接按 1.58 判 FAIL；**带 tag 后
+>    checks 会挂上 `POWER_POOL_CORRELATION` + `POWER_POOL_DESCRIPTION_FORMAT` 两个 PP 专属项**，
+>    但实测 `LOW_SHARPE` 的 limit **仍是 1.58**——因为 description 未填，PP 资格不成立，平台退回常规通道。
 > 3. **`model51` 字段（如 `unsystematic_risk_last_360_days`）双杀**：实测提交出现
 >    `CONCENTRATED_WEIGHT` FAIL（None/None）+ `LOW_COVERAGE` FAIL（value=17, limit=5），
 >    **常规与 PP 两条通道都过不去**。PP 候选避开 model51。
@@ -367,6 +472,205 @@ rank(ts_rank(operating_income / sales * sales / assets, 126))
 >    （`operating_income/equity`≈1.23、IV skew 1.5+），但那些又撞 SELF/PP 相关。
 >    ⇒ 想用 ≤3 字段达到 PP 的 Sharpe≥1.0，**更靠谱的是 ≤3 字段的双腿正交混合**（见 §10 双腿 33% 命中率），
 >    而非单腿未饱和信号——单腿未饱和信号普遍卡在 0.6–0.9。
+
+#### 5.1.4 PP 提交机制实测：`POWER_POOL` tag 怎么打、缺什么会退回常规通道
+
+2026-10-31 在真实账户上做的对照实验（零仿真消耗，只涉及元数据与提交尝试）。
+
+**① tag 怎么打**：alpha 对象顶层有 `tags: []` 数组字段，`PATCH /alphas/{id}`（`Allow: GET, PUT, PATCH, HEAD, OPTIONS`）可写。
+
+```python
+brain.request("PATCH", f"/alphas/{aid}", json={"tags": ["POWER_POOL"]})
+```
+
+`PATCH` 的字段白名单实测（2026-10-31）：`tags` / `name` / `color` / `category` 接受 200；
+`description` / `notes` / `idea` / `rationale` 全部返回 400 `{"description":["Unexpected property."]}`。
+
+**② tag 取值**：本账户 664 个 alpha 的 tag 分布实测为
+`{'POWER_POOL': 2, '9B3qVP4': 1, 'Power Pool Alpha': 2, '基本与技术混合': 3}`。
+`POWER_POOL`（全大写下划线）是系统枚举值，`9B3qVP4` 是 theme id，两者可并存；
+`Power Pool Alpha` 与 `基本与技术混合` 形态上都是用户自定义标签，**不要用它当 PP 触发标记**。
+
+**③ 带 tag / 不带 tag 的提交差异**（同一账户、同为 FULL 模式的对照）：
+
+| | 无 tag（`vR1zPEXG`，S=-1.45） | 带 `POWER_POOL` tag（`YP1k0EJo`，S=1.44） |
+|---|---|---|
+| submit 响应 | 403 | 403（首次曾返回 201 但未落地） |
+| checks 数量 | 18 | 18 |
+| `POWER_POOL_CORRELATION` | **不存在** | **PENDING** |
+| `POWER_POOL_DESCRIPTION_FORMAT` | **不存在** | **WARNING** |
+| `LOW_SHARPE` limit | 1.58 | **1.58（未降到 1.0）** |
+
+**结论（2026-10-31 下午修订）**：tag + description 都只是**必要条件**，两者齐备仍不足以切到 PP 通道——
+见下面 ④′ 的对照实验。真正决定 PP 资格的是**活跃 theme 的作用域**（region/delay），见 §5.1.5。
+
+**④ ~~description 的入口：API 无接口，只能走网页端~~ → 已推翻（2026-10-31 下午实测）**
+
+**description 可以用 PATCH 写，只是不在顶层**：它嵌在 `regular` 对象之下。
+
+```python
+brain.request("PATCH", f"/alphas/{aid}", json={"regular": {"description": "Idea: ... Rationale for data: ... Rationale for operators: ..."}})
+# -> 200，且重读 alpha 后 regular.description 长度持久化（实测 1544 / 1694 字符均成功）
+```
+
+- 顶层 `{"description": ...}` 确实报 400 `Unexpected property`（旧结论只对了一半）；
+- 写入后 `POWER_POOL_DESCRIPTION_LENGTH` / `POWER_POOL_DESCRIPTION_FORMAT` 两个 WARNING 消失；
+- **但 `LOW_SHARPE` 的 limit 依旧是 1.58**，`POWER_POOL_CORRELATION` 依旧 `PENDING`。
+
+**④′ tag + description 齐备后的对照实验（决定性，两个区域各一次）**
+
+| 区域 | alpha | tags | description | `LOW_SHARPE` limit | 403 body |
+|---|---|---|---|---|---|
+| USA | `unsystematic_risk_last_360_days` 候选 | `POWER_POOL` | 434 字符 | **1.58（未降）** | 另被 model51 的 `LOW_COVERAGE`/`CONCENTRATED_WEIGHT` 双杀 |
+| GLB | `leAz1nP7`（EBITDA/EV，S=1.17） | `POWER_POOL` | 1694 字符 | **1.58（未降）** | `PROD_CORRELATION=0.7785` 等常规项 |
+| GLB | `bl6PgQNN`（反转，S=1.88） | `POWER_POOL` | 1544 字符 | **1.58（未降）** | `PROD_CORRELATION=0.9673` 等常规项 |
+
+⇒ **tags + description 不是 PP 提交的触发器。** 平台仍按 REGULAR 门槛（Sharpe 1.58 / Fitness 1.0 / ProdCorr 0.7）判定。
+
+**⑤ QUICK 模式无法提交**：`POST /alphas/{id}/submit` 对 `settings.simulationMode == "QUICK"` 的 alpha
+直接返回 400 `{"detail":"Cannot submit QUICK mode alphas"}`。而 QUICK 仿真的 `is.checks` 只有 7 项
+（缺 SELF/PROD/POWER_POOL 相关项），**不能用 QUICK 结果预判能否提交**——必须 FULL 重跑。
+
+**⑥ tag 不可逆**：官方原文 "Once you tag an Alpha as power pool, it stays in the self-correlation pool
+even if you untag it later." —— 打 tag 是单向门。**只在确定投 PP 的候选上打，绝不在试验品上打。**
+
+**⑦ PP 通道只放宽 Sharpe，不放宽其余三项——这是最容易漏的杀手**
+
+2026-10-31 实测（`3qo6Rp9X` → FULL 重跑得 `ZYQlv7Yd`）：Sharpe **1.6 已过常规 1.58 线**，
+但提交仍 403，且 `SELF_CORRELATION` 停在 PENDING（说明根本没走到相关性计算那一步）。
+拦路的是三项与 PP 无关的检查：
+
+| check | value | limit | 判定 |
+|---|---|---|---|
+| LOW_SHARPE | 1.6 | 1.58 | **PASS** |
+| LOW_FITNESS | 0.65 | 1.0 | FAIL |
+| CONCENTRATED_WEIGHT | 0.1538 | 0.1 | FAIL |
+| LOW_SUB_UNIVERSE_SHARPE | 0.23 | 0.69 | FAIL |
+
+⇒ **PP 的 Sharpe ≥1.0 只是放宽了 `LOW_SHARPE` 一项**，`LOW_FITNESS` 仍按 1.0、
+`CONCENTRATED_WEIGHT` 仍按 0.1、`LOW_SUB_UNIVERSE_SHARPE` 仍按
+`0.75·√(size_ratio)·Sharpe` 判。官方 PP 条件里写的 "must pass turnover tests / sub-universe test /
+robust-universe test" 就是这个意思。**判断 PP 可行性时不能只算 Sharpe 和字段数。**
+
+**根因诊断（已由 ⑩ 的实测验伪，见下）**：初判把三项 FAIL 都归因于 `decay=0` 导致的高换手
+（TO 36.56%），并主张「decay 0→10 是第一修复动作」。**该因果链对 `CONCENTRATED_WEIGHT` 是错的、
+对其余两项也只是部分成立**——decay=10 的实测结果见 ⑩。真正的结论是：这条 alpha 的失败是
+**边际过薄（margin 3.27bp）+ 小票失效**的结构性问题，调 decay 无法修复。
+
+**⑧ QUICK 与 FULL 的指标关系（同表达式实测）**：`3qo6Rp9X`(QUICK) 与 `ZYQlv7Yd`(FULL)
+的 IS 指标**逐项完全相同**（S=1.6 / F=0.65 / TO=36.56% / Ret=5.97% / DD=6.83%），差别只在 checks——
+QUICK 只有 7 项、缺 SELF/PROD/POWER_POOL_CORRELATION 等 8 项。
+⇒ **QUICK 可以用来快速预筛 Sharpe 与 Fitness，但不能用来判断可否提交**；定稿候选仍需 FULL 复核。
+
+**⑨ 工具**：`scripts/pp_precheck.py`（零仿真消耗）对 alpha_id 或裸表达式做 PP 资格体检：
+
+```bash
+python scripts/pp_precheck.py <alpha_id> [alpha_id ...]      # 查线上 alpha
+python scripts/pp_precheck.py --expr "rank((a-b)/((a+b)/2))" # 只算字段/算子/形状
+```
+
+它用本地 4367 字段快照做标识符归类（在字段表里→字段，否则→算子），因此能准确区分
+`subindustry` 这类分组字段（不计入）与真正的数据字段；算术运算符单独计数，`ts_backfill` /
+`group_backfill` 按官方规则豁免。同时报告 `simulationMode`（QUICK 直接标 FAIL）、
+`POWER_POOL` tag 有无、`POWER_POOL_DESCRIPTION_FORMAT` 状态，以及是否构成 `(A−B)/mean` 形状。
+
+**⑩ decay 调参实测验伪：内部已含平滑时，加大 decay 会吃掉信号（2026-10-31）**
+
+对 `3qo6Rp9X`/`ZYQlv7Yd` 做单变量对照，**唯一改动是 `decay: 0 → 10`**（其余 settings 逐项沿用：
+USA / TOP3000 / delay 1 / SUBINDUSTRY / truncation 0.08 / FULL）。变体 id `WjOXrGRx`，消耗 1 次仿真。
+
+| 指标 | decay=0 (`ZYQlv7Yd`) | decay=10 (`WjOXrGRx`) | 变化 |
+|---|---:|---:|---|
+| Sharpe | **1.60** | **1.31** | −18% ❌ |
+| Fitness | 0.65 | 0.68 | +5% |
+| Turnover | 36.56% | **18.93%** | −48% ✅ |
+| Returns | 5.97% | 5.16% | −14% |
+| Margin | 3.27 bp | 5.45 bp | +67% |
+| **LOW_2Y_SHARPE** | **1.86 PASS** | **1.50 FAIL** | 由过变挂 ❌ |
+| **LOW_SUB_UNIVERSE_SHARPE** | 0.23 / 0.69 FAIL | 0.15 / 0.57 FAIL | 更差 ❌ |
+| **CONCENTRATED_WEIGHT** | 0.153846 FAIL | **0.153846 FAIL** | **六位小数完全不变** |
+| LOW_SHARPE | 1.60 PASS | 1.31 FAIL | 由过变挂 ❌ |
+
+三条可复用结论：
+
+1. **换手确实腰斩，但这是以牺牲信号为代价的**。该表达式内部已有 `ts_decay_linear(...,5)`，
+   再叠加 `decay=10` 等于二次平滑，把 5 日快信号的主要 alpha 抹平——Sharpe −18%、
+   近期（2Y）Sharpe 从 1.86 掉到 1.50。**「decay 是快信号的万能修复」不成立**：
+   只有当表达式本身**不含**时间平滑算子时，decay 才是纯降噪手段；已含
+   `ts_decay_linear` / `ts_mean` / `ts_rank` 时，decay 与内部窗口会叠加，须把两者当同一个
+   平滑预算来分配，而不是各调各的。
+2. **`CONCENTRATED_WEIGHT = 0.153846` 与 decay 无关**——两次运行逐位相同（0.153846 = 2/13）。
+   该值来自表达式自身的截面权重分布（IV 有效票数在某些交易日塌缩），**不是换手造成的**。
+   初判的「换手快→权重来不及分散」被证伪。修复只能从字段覆盖度、`truncation`、`neutralization`
+   下手，调 decay 无效。
+3. **Fitness 几乎不动（0.65→0.68）是必然的**：Fitness ≈ Sharpe×√(|ret|/max(TO,0.125))，
+   decay=10 让 ret/TO 比值从 0.163 升到 0.273（好转），但 Sharpe 同时掉了 18%，
+   两者互相抵消。**要让 Fitness 从 0.65 到 1.0，在 Sharpe≈1.6 时需要 ret/TO ≈ 0.39，
+   即边际要翻 2.4 倍——这不可能靠调参达成，必须换更强的信号源。**
+
+⇒ **判据**：`margin` 低于 ~5bp 的候选，不要指望靠 decay / truncation / neutralization 调参
+过 Fitness 1.0 线，直接放弃或换信号。该 alpha 的 margin 在最优 decay 下也只到 5.45bp，
+属于「信号真实但太薄」，不是参数没调好。
+
+#### 5.1.5 PP 的真正开关是「活跃 theme 的作用域」——本账户为 GLB/D1
+
+**一、`MATCHES_THEMES` 是判读 theme 状态的唯一窗口**（API 无 themes 接口：`/themes`、
+`/themes/{id}`、`/competitions/{id}` 全 404，`/competitions` 只返回 7 个已结束赛事）。
+
+alpha 的 `is.checks[]` 里每个 theme 单独一条 `MATCHES_THEMES`，`result` 语义为：
+
+| result | 含义 |
+|---|---|
+| **PASS** | 主题**已生效**且该 alpha 命中（会带 `multiplier`） |
+| **WARNING** | 主题**已生效**但未命中（例如换手不在 15–30% 区间） |
+| **PENDING** | **主题尚未评估/尚未生效**，命中与否未知 |
+
+本账户看到的三条：
+`AyomWlD` GLB/D1 turnover 15...30%（multiplier 2.5）、`JypwKv4` GLB/D1/FUNDAMENTAL Pyramid（1.4）、
+`9B3qVP4` **GLB/D1 Power Pool Nov\`26（1.0）**。
+
+**二、关键判据：PP 主题即使已打 tag + 已写 description 仍恒定 `PENDING`**
+（USA 与 GLB 各有样本验证）。结合 403 仍按 1.58 判定，推断 **PP 主题在 2026-10-31 尚未生效**
+（名称含 `Nov\`26`，很可能 11 月 1 日开池）。⇒ **别再在「如何触发 PP」上做实验，先看 theme 是否 PASS。**
+
+**三、PP 候选必须跑在主题指定的 region/delay 上 —— 本主题是 GLB/D1**
+USA/D1 的 alpha 永远进不了这个池（它的 turnover/pyramid 主题只会显示 WARNING）。这是过去
+10 条 USA 候选全部白跑的根因。
+
+**四、GLB 区域的数据可用性与 USA 完全不同（踩坑重点）**
+- `analyst4` 在 GLB **不存在** ⇒ **所有 `anl4_*` 字段在 GLB 报 `unknown variable`**。
+- `fundamental6` 在 GLB 只有 197 字段，裸名 `operating_income` / `debt` / `equity` 全部不可用。
+- **GLB 实测可用字段**：
+  `pv1`：`returns` `close` `open` `high` `low` `vwap` `volume` `adv20` `cap` `sharesout`（cov 1.0）；
+  `fundamental17`：`fnd17_ebitda2ev`(0.78) `fnd17_fcf1a`(0.78) `fnd17_atotd2cap`(0.75) `fnd17_ev_cur`(0.79)；
+  `fundamental23`：`fnd23_roe`(0.96) `fnd23_net_debt`(0.89) `fnd23_capex`(0.94) `fnd23_ofc`(0.96)；
+  `analyst14`：`anl14_*`（cov 0.5）；`analyst69`：`anl69_*`（多为 VECTOR）。
+- 正确查法：`GET /data-fields?region=GLB&delay=1&universe=TOP3000&dataset.id=fnd23&limit=20&order=-alphaCount`。
+  **`search=` 是模糊匹配，会返回仅含子串的无关字段，不能用来证明某字段存在。**
+
+**五、GLB 额外硬门槛：三个子地理 Sharpe 各自 ≥ 1**
+检查项 `LOW_GLB_AMER_SHARPE` / `LOW_GLB_APAC_SHARPE` / `LOW_GLB_EMEA_SHARPE`，limit 均为 1。
+**EMEA 是共同瓶颈**，15 个 GLB 候选实测无一达到 1：
+
+| 信号族 | 表达式 | 总体 Sh | AMER | APAC | EMEA |
+|---|---|---|---|---|---|
+| 反转 d=0 | `group_rank(-ts_rank(returns,126),subindustry)` | 1.42 | 0.52 | 1.05 | **0.73** |
+| 反转 d=4 | 同上 +decay4 | 1.99 | 0.95 | 1.83 | 0.52 |
+| 反转 d=10 | 同上 +decay10 | 1.88 | 1.00 | 1.97 | 0.25 |
+| 反转 d=20 | 同上 +decay20 | 1.67 | 1.04 | 1.70 | 0.14 |
+| EBITDA/EV | `group_rank(ts_rank(fnd17_ebitda2ev,126),subindustry)` | 1.17 | 0.67 | 1.07 | -0.27 |
+| ROE | `group_rank(ts_rank(fnd23_roe,126),subindustry)` | 0.47 | 0.90 | 0.30 | -0.53 |
+| FCF/资产 | `group_rank(ts_rank(fnd17_fcf1a,126),subindustry)` | 0.31 | 0.06 | 0.49 | -0.18 |
+
+- **`decay` 对 EMEA 单调有害**（0.73→0.52→0.25→0.14），同时轻微抬高 AMER。
+  用 decay 救换手会把 EMEA 打死 —— 这是 GLB 上最坑的权衡。
+- **GLB 的 12M 动量是反的**：`group_rank(ts_rank(returns,252))` Sharpe **-1.45**（APAC -1.07、EMEA -0.77），
+  GLB 大市值池里做的是反转。
+
+**六、`PROD_CORRELATION` 只在提交时可见，且已排除两条最自然的路**
+`is.checks[]` 恒 `PENDING`，真实值只出现在 403 body（即使 Sharpe 已达标也会一并列出，可白嫖诊断）：
+**EBITDA/EV = 0.7785**、**短周期反转 = 0.9673**。PP 要求 <0.5，两者都不可用。
+⇒ 这两类教科书因子在 BRAIN 全局池已高度拥挤，不能再当 PP 主力腿。
 
 > 代码里用 `BrainSession.thresholds(delay)` 取阈值，它按账号权限自动在
 > `CONSULTANT_THRESHOLDS` / `STANDARD_THRESHOLDS` 之间切换。
@@ -824,6 +1128,78 @@ GET https://api.worldquantbrain.com/tutorial-pages/<page_id>    # 正文（block
 
 正文是 block 数组（`HEADING`/`TEXT`/`TABLE`/`EQUATION`/`IMAGE`），按 `type` 渲染即可。**每次大改代码前先拉 `brain-api` 的 `lastModified` 比对**。
 
+#### 7.9.1 搜官方文档 / 找「社区工具」时能到哪、到不了哪（2026-10-31 实测）
+
+| 目标 | 可用通道 | 结论 |
+|------|----------|------|
+| 官方教程正文 | `GET /tutorial-pages/<id>` | ✅ 唯一可靠入口。教程目录用 `GET /tutorials?limit=60` 拿 `pages[].id`（别猜 id，猜的会 404） |
+| 官方站内搜索 | `GET /search?query=` | ⚠️ 多实体返回：`reference` / `tutorialPage` / `video` / `recommendedReading` / `faq` / `event` / `message` / `competition`。**`message` 只索引官方 ANNOUNCEMENT，不含顾问论坛帖** |
+| 顾问社区论坛（Zendesk） | `support.worldquantbrain.com` | ✅ **可读，见 7.9.1.1 的三步法**（当天早些时候误判为不可达，已修正） |
+| 平台侧论坛 API | `/forum` `/forums` `/posts` `/threads` `/community` `/discussions` `/messages` | ❌ 全部 404。论坛**不在** `api.worldquantbrain.com` 上，只有一个 `/messages/<id>` 读**官方公告** |
+
+#### 7.9.1.1 顾问论坛读取三步法（2026-10-31 打通，务必按此走）
+
+论坛是独立 Zendesk（内部域 `worldquantbrain.zendesk.com`），Cloudflare + 登录双闸。三件事缺一不可：
+
+```python
+from curl_cffi import requests as creq            # 1) CF 必须用 TLS 指纹模拟，普通 requests/curl 一律 403
+t = BrainSession().authenticate() ... cookie "t"   # 2) 平台 JWT（HS256，179 字符）
+s = creq.Session(impersonate="chrome")             # 注意：impersonate 写 "chrome"（=最新版）才过；写 "chrome124" 反而 403
+s.get("https://api.worldquantbrain.com/authentication/support",   # 3) 唯一的 SSO 换票端点
+      params={"return_to": target_url}, cookies={"t": t})
+```
+
+- 第 3 步返回 302 → `worldquantbrain.zendesk.com/access/jwt?jwt=<另一个 JWT>` → `/access/return_to?challenge=…` → 目标页，全程自动，`s` 里落 `_zendesk_session` / `_zendesk_authenticated`。
+- **权限**：这个 SSO 只给「当前登录账号本就能看」的内容，即顾问可见的中文专属论坛；非顾问账号预期拿不到。
+- **别自己造 JWT**：直接拿平台 `t` 去打 `/access/jwt` 会报 `JWT signature invalid`（Zendesk 用另一把密钥签），必须走 `authentication/support` 让平台现签。
+- **别用无头 chromium**：`--headless=new --dump-dom` 出来是空/白屏，CF 不放行；`agent-browser` 也卡在「请稍候…」。curl_cffi 才是正解。
+
+拿到 session 后这几个端点全通（这才是论坛调研的主入口）：
+
+| 端点 | 用途 |
+|------|------|
+| `GET /api/v2/community/posts/{id}.json` | 帖子正文（`details` 是 HTML，含 `<img src>` 图链）、`author_id`、票数、评论数 |
+| `GET /api/v2/community/posts/{id}/comments.json` | 全部评论 |
+| `GET /api/v2/help_center/community_posts/search.json?query=<词>` | **论坛全文搜索**（`count` 封顶 1000，返回按相关度；支持引号短语） |
+| `GET /api/v2/help_center/articles/search.json?query=` | 官方文章搜索 |
+| `GET /hc/zh-cn/profiles/{author_id}-{NAME}?filter_by=posts` | 用户主页：活动总数 / 发帖数 / 评论数 / 帖子列表（HTML，正则扒） |
+| `GET /api/v2/users/{id}.json` | ❌ 403，用户资料要从 profile HTML 的 `<title>`（「XXX 的用户个人资料」）拿名字 |
+
+⚠️ 两个坑：`/api/v2/community/posts.json` 的 `query` / `author_id` 参数**被忽略**，会返回全站最新 8858 条；要搜就用 `community_posts/search.json`。`/api/v2/search.json` 是 403（需 agent 权限）。
+
+⇒ 结论：**论坛完全可读，别再退到公开镜像**。镜像（ima.qq.com AlphaNode、10100.com、公众号）只当交叉验证用。
+
+#### 7.9.2 官方 `ace_lib.py` vs 社区 `machine_lib.py`（常被混为一谈）
+
+| | 官方 ACE API Library | 社区 `machine_lib.py` |
+|---|---|---|
+| 出处 | Learn → `documentation-ace-api-library-gold`（lastModified 2026-09-18），附件在其内链的 support 文章 | 无官方出处；总与 `Alpha Machine.ipynb` 成对出现在各类 GitHub 挖矿仓库 |
+| 文件 | `ace_lib.py` + `helpful_functions.py` + `how_to_use.ipynb` + `requirements.txt` | 单文件 `machine_lib.py` |
+| 权限 | Gold 起可下（Expert/Master 另有版本页） | 无门槛，靠转载 |
+| 分发 | support 站附件 | **不在 PyPI**（`/pypi/machine_lib/json` → 404） |
+| 典型接口 | `login()`、`simulate_single_alpha()`、`get_datafields()`、`check_submission()` | `login()`、`simulate()`、`multi_simulate()`、`get_alphas()`、`check_submission()`、`set_alpha_properties()`、`ts_factory/group_factory/vector_factory` |
+| 现状 | 官方维护 | 同步实现，无 `Retry-After` 感知；后继者是 PyPI `wqb`（`A better machine lib.`，`WQBSession(requests.Session)`，自称**兼容 machine_lib.py**，异步，官方 BRAINbot 推荐） |
+
+**对本仓库的含义**：`scripts/wq_api.py` 已是这条技术路线上的第三代实现（`Retry-After` 轮询 + 多仿真 + 额度 + `SimulationCache` 去重 + 日期对齐相关性），**不需要引入 `machine_lib` 或 `wqb`**；但看别人的 `machine_lib` 脚本时，函数名与本仓库的对应关系是 `login()→BrainSession().authenticate()`、`simulate()→simulate_one()/run_many()`、`check_submission()→gate_report()`、`submit_alpha()→submit_verified()`。
+
+#### 7.9.3 `cnhkmcp` 的客户端选择（2026-10 核实）
+
+`cnhkmcp` 是**标准 stdio MCP server**（`command` + `args` + 包内 `user_config.json`），与 IDE 无绑定；2026 年 MCP 已是所有 AI IDE 的标配，所以「哪个 IDE 能用」的实质是「**哪个 IDE 的模型额度免费且够用**」。真正吃额度的是 `get_multisimulation_result` / `get_alpha_pnl` 返回的巨量 JSON。
+
+| 客户端 | 形态 / 成本 | 免费档关键限制 |
+|---|---|---|
+| Google Antigravity（IDE / 2.0 / CLI） | macOS/Win/Linux，个人**免费公测**，内置 Gemini | 预览期额度，未公布收费方案 |
+| Trae（TraeCode / TraeWork） | Win/macOS/Linux，免费档 | Auto 模式 only、5000 补全/月、约 500 积分/月 |
+| VS Code + Cline | 扩展，Apache-2.0，免费 | BYOK 或 Ollama（可 $0） |
+| VS Code / JetBrains + Kilo Code | 扩展 + CLI，免费开源（2026-04 重建于 OpenCode） | BYOK，零加价 |
+| opencode | CLI/TUI，免费开源 | BYOK |
+| Zed | 编辑器，开源免费 | AI 需 BYOK |
+| Windsurf → **Devin Desktop**（Cognition 收购后改名） | Win/macOS/Linux | 免费档仅 light agent quota |
+| Cursor Hobby | Win/macOS/Linux | 额度极小 |
+| ~~Roo Code~~ | **2026-05-15 关停，仓库已归档**（推荐迁移到 Cline/Kilo） | — |
+
+配置要点：`command` 用**装了 cnhkmcp 的那个 venv 的 python 绝对路径**，`args` 指向包内 `platform_functions.py`；包路径用 `python -c "import cnhkmcp,os;print(os.path.dirname(cnhkmcp.__file__))"` 查。远程 MCP 在多数客户端写 `url`，**Antigravity 例外，必须写 `serverUrl`**（写错不报错、只是加载不到工具）。前置依赖：Python ≥3.8、pandas、selenium、**本机 Chrome**（`search_forum_posts` 用）；wheel 约 79 MB。仓库 `github.com/cnhk/cnhkmcp` 已 404，只剩 PyPI 可装 —— 属于把平台账号密码交给第三方代码，自行评估。
+
 ### 7.10 常见 API 错误
 
 | 现象 | 原因与处理 |
@@ -878,6 +1254,9 @@ GET https://api.worldquantbrain.com/tutorial-pages/<page_id>    # 正文（block
 
 ## 9. 提交前 Checklist
 
+- [ ] 已运行 `recommend_fields.py`，信号字段从低拥挤字段池中选取
+- [ ] 每个信号字段已写出一句话经济学解释（`--field-rationale`）
+- [ ] `simulate_batch.py` 静态检查通过（无高 alphaCount 字段、无 ACTIVE 池已用字段）
 - [ ] 已获取 **所有** alpha 列表（含 ACTIVE / UNSUBMITTED），不只是本次模拟
 - [ ] 新因子与已有 ACTIVE alpha **日收益** 相关性 < 0.7（或新 Sharpe ≥ 旧 Sharpe × 1.1）
 - [ ] 相关性基于 **日收益** 计算、**按日期交集对齐**，不是累计 PnL
@@ -1233,3 +1612,33 @@ REGULAR_SUBMISSION PASS   value=0      limit=4      ← 配额根本没用完
 - 或接受饱和现实，停止在本账户增量提交，转去**挖掘全新数据源的慢信号**（analyst 全文、供应链、另类数据），这类在第 4 轮甜点区里 `anl4_*` 数值字段（分歧/覆盖度）相关最低（0.5 档），是相对不拥挤的方向，但需要更长回看窗口和更精细的构造。
 
 **工具更新**：`scripts/guard_new.py` 增加 `--glob`（默认 `opt_exempt_results.json`）与 `--only` 过滤，可对任意一轮候选跑双层护栏；`scripts/opt_exempt.py` 在 `run_many` 后加了空 alpha_id 重试兜底（偶发 API 返回空 id）。`scripts/exempt_scan.py` 把 22 条 ACTIVE 按 Sharpe 排序、输出结构特征到 `.workbuddy/active_structures.json`，是豁免路径的零成本起点。
+
+### 2026-10-31 — Power Pool 形状的结构性洞察：(A−B)/mean(A,B) 是 ≤3 字段下的唯一高 Sharpe 结构
+
+用户候选 `rank(ts_decay_linear((implied_volatility_call_180 - implied_volatility_put_180) / implied_volatility_mean_180, 5))`，问能否做成 PP alpha。**零仿真消耗判定，结论：形状够格、内容已死。**
+
+**四道 PP 闸门的实际读数**：
+
+| 闸门 | 阈值 | 候选实测 | 判定 |
+|---|---|---|:--:|
+| 算子数 | ≤ 8 | 4 | ✓ |
+| 唯一字段 | ≤ 3 | 3 | ✓ |
+| Sharpe | ≥ 1.0 | 同族 1.55（`58p0232N`） | ✓ |
+| PP 相关 | < 0.5 | 撞 `58p0232N`，信号级相关 ≈1.0 | ✗ |
+
+**致命点**：池内已有 ACTIVE `58p0232N` = `rank(ts_mean(同一 IV skew, 5))`（S=1.55 / F=1.18 / TO=11.5% / INDUSTRY / decay 10）。候选与它**同字段、同窗口、同 rank 外壳，只差 `ts_mean`→`ts_decay_linear`**。PP 相关门槛 0.5 比 SELF 的 0.7 更严，同一信号换平滑算子必挂。历史佐证：`JjGEGvJA` 即 `rank(ts_decay_linear(skew, 10))`（S=1.56 / F=1.00 / TO=16.1%），早已跑过、从未提交成功。
+
+**核心洞察（可复用）**：IV skew 单腿就能到 Sharpe 1.55，**不是因为 IV 字段，而是因为 `(A − B) / mean(A,B)` 这个「两个同源反向分子 + 一个同源分母」的 3 字段形状**。分母取两分子均值使该指标天然有界，带来低换手、低回撤和稳定排序——这是在 ≤3 字段约束下唯一能同时满足「Sharpe ≥1.0」和「形状合规」的结构。推论：
+
+- **优化 PP 候选应保留这个差分形状、换数据族**，而不是换期限/换窗口（后者已被 §12 的 7 次仿真证伪：同族换期限相关仍在 0.70–0.94）。
+- 判定一个 PP 候选有没有希望，先问「它的 3 个字段是否构成一个正向分量对 + 一个归一化分母」；若是单比率（`a/b`）或单字段 rank，Sharpe 几乎必然落在 0.6–0.9（§5.1.2 首批实测 9 条非 model51 候选 0.09–0.92）。
+
+**同构替代候选（零成本从本地字段快照挖出，未仿真）**：
+
+| 族 | 正向分量对 | 覆盖度 | 我方使用 | 备注 |
+|---|---|---|---|---|
+| news12 | `news_high_exc_stddev` / `news_low_exc_stddev` | 0.965 / 0.971 | 零 | 新闻窗口内「高点→最新价」「最新价→低点」标准化变动；本质是价格量，需警惕与 pv1 振幅/反转隐藏相关 |
+| analyst4 | `highest_sales_estimate` / `lowest_sales_estimate` | 1.0 / 1.0 | 零 | 语义是预测区间宽度（分歧），不是方向，需重新设计符号 |
+| analyst4 | `anl4_buy` / `anl4_hold` | 0.624 | 零 | 均为 VECTOR，需 `vec_avg`，按旧经验不可直接进标量算子 |
+
+**字段语义陷阱补充**：`implied_volatility_mean_180` 的 description 明确是 "The average of IvCall180 and IvPut180"——分母与分子同源，这正是该指标能稳定的原因。构造同构指标时应显式复刻这一点（用 `(A+B)/2` 作分母），不要换成 `close` / `cap` 之类异源分母。

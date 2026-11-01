@@ -61,7 +61,7 @@ wq-alpha-research/
 │   └── wq_*.py              # archived per-experiment variant runners
 └── references/
     ├── wq_usa_top3000_delay1_data_fields.csv
-    ├── wq_usa_top3000_delay1_data_fields.json
+    ├── fields_usa_top3000_delay1.json
     └── wq_usa_top3000_delay1_data_fields_summary.json
 ```
 
@@ -85,7 +85,7 @@ import json
 from pathlib import Path
 
 fields = json.loads(
-    Path("references/wq_usa_top3000_delay1_data_fields.json").read_text(encoding="utf-8")
+    Path("references/fields_usa_top3000_delay1.json").read_text(encoding="utf-8")
 )
 
 keyword = "operating_income"
