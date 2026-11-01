@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 from wq_api import BrainSession  # noqa: E402
 
-FIELDS_JSON = REPO / "references" / "wq_usa_top3000_delay1_data_fields.json"
+FIELDS_JSON = REPO / "references" / "fields_usa_top3000_delay1.json"
 TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 

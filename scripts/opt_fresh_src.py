@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from wq_api import BrainSession, SimulationCache, build_payload  # noqa: E402
 
-FIELDS_JSON = REPO / "references" / "wq_usa_top3000_delay1_data_fields.json"
+FIELDS_JSON = REPO / "references" / "fields_usa_top3000_delay1.json"
 
 # ---- 腿定义（全部来自我方 ACTIVE 零/低占用 dataset）----
 # pv13：竞品 / 合作伙伴的当日收益与关系数量

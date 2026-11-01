@@ -1,0 +1,13 @@
+{
+  "snapshots": [
+    {
+      "key": "usa_top3000_delay1",
+      "region": "usa",
+      "universe": "top3000",
+      "delay": 1,
+      "path": "fields_usa_top3000_delay1.json",
+      "field_count": 4367,
+      "updated_at": "2026-11-01T06:08:28+00:00"
+    }
+  ]
+}
