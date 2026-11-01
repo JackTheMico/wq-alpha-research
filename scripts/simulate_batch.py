@@ -41,9 +41,13 @@ from wq_api import (  # noqa: E402
     build_payload,
     submit_verified,
 )
+from static_check import run_static_check  # noqa: E402
+from field_snapshot import load_snapshot, snapshot_exists  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
+ACTIVE_CACHE_PATH = SKILL_DIR / ".active_fields_cache.json"
+ACTIVE_CACHE_TTL = 3600  # 1 小时
 
 
 def load_variants(path: Path) -> list[tuple[str, dict]]:
@@ -85,17 +89,39 @@ def fmt_metrics(alpha: dict) -> str:
     return " ".join(parts)
 
 
+def load_active_fields(brain: BrainSession, region: str) -> set[str]:
+    """加载当前区域 ACTIVE 池已用字段（带 1 小时本地缓存）。"""
+    import time as _time
+    if ACTIVE_CACHE_PATH.exists():
+        cache = json.loads(ACTIVE_CACHE_PATH.read_text(encoding="utf-8"))
+        if cache.get("region") == region and (_time.time() - cache.get("ts", 0)) < ACTIVE_CACHE_TTL:
+            return set(cache.get("fields", []))
+    actives = brain.alphas(status="ACTIVE", page_size=100)
+    valid_ids: set[str] = set()
+    for a in actives:
+        code = (a.get("regular") or {}).get("code") or ""
+        valid_ids.update(__import__("re").findall(r"[A-Za-z_][A-Za-z0-9_]*", code))
+    ACTIVE_CACHE_PATH.write_text(
+        json.dumps({"region": region, "ts": _time.time(), "fields": sorted(valid_ids)}),
+        encoding="utf-8",
+    )
+    return valid_ids
+
+
 def print_table(rows: list[dict[str, Any]]) -> None:
     if not rows:
         print("（无结果）")
         return
-    w = max(len(r["name"]) for r in rows)
+    w = max(len(str(r.get("name", "?"))) for r in rows)
     for r in rows:
         alpha = r.get("alpha") or {}
         flag = "✅" if r.get("gate_ok") else "❌"
-        print(
-            f"{flag} {r['name']:<{w}} {r['alpha_id']:<10} {fmt_metrics(alpha)}"
-        )
+        # alpha_id 可能为 None（仿真 ERROR/未完成），不能直接用于格式化，
+        # 否则 TypeError 会让整个批次的结果在落盘前丢失。
+        aid = str(r.get("alpha_id") or "-")
+        print(f"{flag} {str(r.get('name', '?')):<{w}} {aid:<10} {fmt_metrics(alpha)}")
+        if r.get("message"):
+            print(f"     ! {str(r['message'])[:200]}")
         for msg in r.get("gate_msgs", []):
             print(f"     · {msg}")
 
@@ -119,6 +145,15 @@ def main() -> int:
     ap.add_argument("--submit", action="store_true", help="把通过本地门槛的 alpha 提交")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要提交的 payload")
     ap.add_argument("--out", default="batch_results.json", help="结果落盘路径")
+    # 静态检查参数
+    ap.add_argument("--field-rationale", default=None,
+                    help='信号字段经济学解释，JSON 格式：{"字段名": "解释"}')
+    ap.add_argument("--allow-crowded", action="store_true",
+                    help="豁免字段拥挤度检查（alphaCount > 500 的信号字段）")
+    ap.add_argument("--allow-unknown-field", action="store_true",
+                    help="豁免快照外字段检查")
+    ap.add_argument("--skip-static-check", action="store_true",
+                    help="跳过静态检查（不推荐）")
     args = ap.parse_args()
 
     if args.file:
@@ -156,16 +191,72 @@ def main() -> int:
         settings.update(per_variant)
         payloads.append((name, build_payload(expr, settings=settings)))
 
+    # 确定区域/宇宙/延迟（用于静态检查）
+    region = overrides.get("region", DEFAULT_SETTINGS["region"])
+    universe = overrides.get("universe", DEFAULT_SETTINGS["universe"])
+    delay = overrides.get("delay", DEFAULT_SETTINGS["delay"])
+
+    if not args.skip_static_check:
+        brain = BrainSession(credential_file=str(SKILL_DIR / "credential.txt"))
+        brain.authenticate()
+        print(
+            f"user={brain.user_id} consultant={brain.is_consultant} "
+            f"剩余额度={brain.remaining_simulations}"
+        )
+
+        # 加载字段快照
+        if snapshot_exists(region, universe, delay):
+            fields = load_snapshot(region, universe, delay, brain=brain)
+            field_lookup = {f["id"]: f for f in fields}
+        else:
+            field_lookup = {}
+
+        # 加载 ACTIVE 池
+        active_fields = load_active_fields(brain, region)
+        print(f"ACTIVE 池已用字段: {len(active_fields)} 个")
+
+        # 解析 field-rationale
+        field_rationale = {}
+        if args.field_rationale:
+            try:
+                field_rationale = json.loads(args.field_rationale)
+            except json.JSONDecodeError:
+                ap.error("--field-rationale 必须是合法 JSON")
+
+        # 对每个表达式做静态检查
+        all_errors = []
+        for name, payload in payloads:
+            expr = payload.get("regular", "")
+            errors = run_static_check(
+                expr, field_lookup, active_fields,
+                field_rationale=field_rationale if field_rationale else None,
+                allow_crowded=args.allow_crowded,
+                allow_unknown=args.allow_unknown_field,
+            )
+            if errors:
+                all_errors.append((name, errors))
+
+        if all_errors:
+            print("\n❌ 静态检查未通过：")
+            for name, errors in all_errors:
+                print(f"\n  [{name}]")
+                for e in errors:
+                    print(f"    · {e}")
+            print("\n请修复后重试，或加 --skip-static-check 跳过（不推荐）。")
+            return 1
+        print("✅ 静态检查通过")
+
     if args.dry_run:
         print(json.dumps([{"name": n, "payload": p} for n, p in payloads], indent=2, ensure_ascii=False))
         return 0
 
-    brain = BrainSession(credential_file=str(SKILL_DIR / "credential.txt"))
-    brain.authenticate()
-    print(
-        f"user={brain.user_id} consultant={brain.is_consultant} "
-        f"multi_sim={brain.supports_multi_simulation} 剩余额度={brain.remaining_simulations}"
-    )
+    if args.skip_static_check:
+        brain = BrainSession(credential_file=str(SKILL_DIR / "credential.txt"))
+        brain.authenticate()
+        print(
+            f"user={brain.user_id} consultant={brain.is_consultant} "
+            f"剩余额度={brain.remaining_simulations}"
+        )
     th = brain.thresholds(int(overrides.get("delay", DEFAULT_SETTINGS["delay"])))
     print(f"门槛（D{overrides.get('delay', DEFAULT_SETTINGS['delay'])}）: {th}")
 
@@ -219,11 +310,8 @@ def main() -> int:
         ok, msgs = brain.gate_report(alpha)
         row.update({"alpha": alpha, "gate_ok": ok, "gate_msgs": msgs})
 
-    print("\n=== 结果 ===")
-    print_table(results)
-    print(f"\n剩余额度: {brain.remaining_simulations}（reset in {brain.rate_limit.get('reset')}s）")
-
-    out_path = SKILL_DIR / args.out
+    # 先落盘再打印：打印环节若抛异常，成果不至于丢失。
+    out_path = Path(args.out) if Path(args.out).is_absolute() else (SKILL_DIR / args.out)
     out_path.write_text(
         json.dumps(
             [
@@ -238,6 +326,10 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"结果已写入 {out_path}")
+
+    print("\n=== 结果 ===")
+    print_table(results)
+    print(f"\n剩余额度: {brain.remaining_simulations}（reset in {brain.rate_limit.get('reset')}s）")
 
     if args.submit:
         winners = [r for r in results if r.get("gate_ok") and r.get("alpha_id")]

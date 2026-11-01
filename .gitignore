@@ -3,6 +3,7 @@ alpha_db.json
 batch_submit_results.json
 simulation_cache.jsonl
 batch_results.json
+.active_fields_cache.json
 scripts/_*_results.json
 *.pyc
 __pycache__/
