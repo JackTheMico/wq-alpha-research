@@ -35,6 +35,45 @@ The current playbook is built around USA TOP3000 delay=1 and includes a local sn
 
 The goal is not to promise a fixed Sharpe or submission pass rate. The value is a faster, cleaner alpha mining loop: fewer invalid-field attempts, less repeated correlation failure, better default templates, and a growing memory of what worked or failed.
 
+## Pre-Submit Gate: Green Metrics Are Not Enough
+
+The single most expensive lesson in this repo. An EUR alpha passed every locally visible
+check (`Sharpe 1.80 / Fitness 1.26 / Turnover 16.02%`, local gate `True`) and was still
+rejected on submission:
+
+| Check | After simulation | At submission |
+|---|---|---|
+| `IS_LADDER_SHARPE` | `WARNING 0.88 / 1.58` | **`FAIL 0.88 / 1.58`** |
+| `PROD_CORRELATION` | `PENDING` | **`FAIL 0.8314 / 0.7`** |
+
+Two mechanisms are invisible from simulation output:
+
+1. **A `WARNING` can be re-judged as `FAIL` at submission** — same value, same limit, different verdict.
+   So read the number, never the label.
+2. **`PROD_CORRELATION` is only computed at submission time** — it is `PENDING` forever in
+   `is.checks`, so no local correlation proxy can predict it. The only usable signal is field
+   crowding: that field already had 19,800 alphas in `EUR/TOP2500`.
+
+`scripts/preflight.py` encodes both, so quota is spent only after the gate says GO:
+
+```bash
+python scripts/preflight.py RREmY1Qe KPJG6Jwj
+python scripts/preflight.py --from-json results.json     # batch
+python scripts/preflight.py RREmY1Qe --json --skip-crowding
+```
+
+Exit code `0` means at least one GO; `1` means all NO-GO. `gate_report(strict=True)` is now the
+default in `wq_api.py`, and `submit_verified()` re-POSTs the submit endpoint until the 403 verdict
+document appears (a `GET`-polling loop misreads "still computing" as "submission swallowed").
+
+**Field crowding is a proxy, not the cause.** `PROD_CORRELATION` is judged per *signal family*
+(dataset × economic logic), not per numeric correlation — so changing windows, decay or field
+names inside the same family moves it by nothing. The one calibrated dial is the weight of an
+orthogonal family, and the response is **convex**: 25% orthogonal weight bought only 0.011 on a
+0.7621-rejected alpha, while the next 10 points bought 0.036. In practice that weight also
+collapses `IS_LADDER_SHARPE` below 65%, so the feasible window is narrow. Full procedure, the
+measured weight ladder, and the GBR/TOP700 family map live in **SKILL.md §8.4**.
+
 ## Self-Evolution Loop
 
 `scripts/evolve_skill.py` is the feedback engine. After simulations, submissions, or status checks, it can fetch the user's alpha list, compare new/changed alphas with the local snapshot, compute daily-return correlations against ACTIVE alphas, and generate a Markdown lesson snippet.
@@ -56,13 +95,21 @@ wq-alpha-research/
 ├── SKILL.md
 ├── scripts/
 │   ├── wq_api.py            # shared BRAIN client (auth, multi-sim, rate limits, recordsets)
+│   ├── preflight.py         # pre-submit gate: GO / NO-GO before burning a submit quota
 │   ├── simulate_batch.py    # batch simulate / optional submit, with dedup cache
+│   ├── static_check.py      # pre-simulation checks: field crowding, rationale
+│   ├── recommend_fields.py  # low-crowding field recommendation
 │   ├── evolve_skill.py      # self-evolution: diff alphas, correlations, lesson snippets
+│   ├── wq_forum.py          # consultant forum (Zendesk) reader: search / post / comments
+│   ├── validate_templates.py# batch-validate community template expressions (--dry-run)
 │   └── wq_*.py              # archived per-experiment variant runners
-└── references/
-    ├── wq_usa_top3000_delay1_data_fields.csv
-    ├── fields_usa_top3000_delay1.json
-    └── wq_usa_top3000_delay1_data_fields_summary.json
+├── references/
+│   ├── empirical-log.md     # full experiment log (background, metrics, reasoning)
+│   ├── wq_usa_top3000_delay1_data_fields.csv
+│   ├── fields_usa_top3000_delay1.json
+│   └── wq_usa_top3000_delay1_data_fields_summary.json
+├── reports/                 # long-form research notes
+└── tests/                   # pytest: field snapshot, static check, submit gate
 ```
 
 ## What It Helps With

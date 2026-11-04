@@ -45,8 +45,21 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
   │         ├── 分析师 ──→ group_rank + ts_rank, INDUSTRY/SUBINDUSTRY, decay=0–4
   │         ├── 技术 ────→ 高 decay(10–30) 或混合基本面降低换手
   │         └── 情绪 ────→ nanHandling=ON, 小窗口谨慎
-  └── 提交后 ──→ 验证 status == ACTIVE，否则检查 SELF_CORRELATION
+  ├── 提交被拒 ──→ 看判定书
+  │    ├── PROD_CORRELATION FAIL ──→ **换族混腿**（§8.4：扫全字段 → 单腿 FULL 排序
+  │    │                               → 正交族权重 25%→35% sweep → 双筛 → 依次提交）
+  │    │                              ⚠️ 改窗口/decay/同族字段名对 prod corr 无效
+  │    ├── IS_LADDER_SHARPE FAIL ──→ 增大 decay（GBR 实测 d0/d3 FAIL、d5 PASS）
+  │    └── SELF_CORRELATION FAIL ──→ 与已有 ACTIVE 的信号级重叠，换数据族
+  └── 提交后 ──→ 验证 status == ACTIVE（要等 40–80 次 POST，§7.7.2 坑五）
 ```
+
+**提交前必过 `preflight.py`（§9.1）——指标全绿不等于能提交。** 一次被拒的代价是
+一次提交额度，而拒因（`IS_LADDER_SHARPE` 的 WARNING→FAIL、`PROD_CORRELATION` 只在提交时回算）
+在仿真结果里看不出来。
+
+**如果这条 alpha 的信号族已经在 §9.1 的"饱和族"名单里，别裸提交**——直接按 §8.4 混
+≥35% 正交族再跑，能省掉 2–3 次提交配额。
 
 ---
 
@@ -383,7 +396,7 @@ rank(ts_rank(comprehensive_income_net_tax / sales * sales / assets, 126))
 | 指标 | 公式/含义 | 目标 |
 |------|-----------|------|
 | Sharpe | 日 IR × √252 | 见 5.1.1 阈值表 |
-| Fitness | Sharpe × √(|Returns| / max(TO, 0.125)) | 见 5.1.1 阈值表 |
+| Fitness | Sharpe × √(abs(Returns) / max(TO, 0.125)) | 见 5.1.1 阈值表 |
 | Returns | 年化收益 / $10M | ≥ 7% |
 | Turnover | 日交易额 / Book Size | 1%–70% |
 | Drawdown | 峰值到谷值最大回撤 | < 15% |
@@ -562,6 +575,13 @@ robust-universe test" 就是这个意思。**判断 PP 可行性时不能只算 
 QUICK 只有 7 项、缺 SELF/PROD/POWER_POOL_CORRELATION 等 8 项。
 ⇒ **QUICK 可以用来快速预筛 Sharpe 与 Fitness，但不能用来判断可否提交**；定稿候选仍需 FULL 复核。
 
+> ⚠️ **「QUICK 指标 = FULL 指标」只在个别样本成立（2026-11-04 反证，GBR/TOP700 13 组对照）**：
+> 同表达式只改 `simulationMode`，FULL 的 Sharpe 比 QUICK 系统性低 **0.43–0.51**
+> （例：`rank(-ts_rank(短+中+长,126))` d5：QUICK 1.94 → FULL 1.43）。
+> 逐年拆开看，差异集中在 2014/2020/2023 这些高波动年 ⇒ QUICK 的抽样在这些年份偏乐观。
+> **判据**：QUICK 只能看方向和相对排序（Δ≈−0.45 可当经验偏移量）；**任何要交付 / 要提交的候选必须 FULL 重跑**，
+> 不要把 QUICK 的 Sharpe 直接当达标结论。
+
 **⑨ 工具**：`scripts/pp_precheck.py`（零仿真消耗）对 alpha_id 或裸表达式做 PP 资格体检：
 
 ```bash
@@ -675,6 +695,89 @@ USA/D1 的 alpha 永远进不了这个池（它的 turnover/pyramid 主题只会
 > 代码里用 `BrainSession.thresholds(delay)` 取阈值，它按账号权限自动在
 > `CONSULTANT_THRESHOLDS` / `STANDARD_THRESHOLDS` 之间切换。
 
+**七、GLB 走不通时的正解：迁移到单区域 EUR（2026-11 实测打通）**
+
+GLB 的三子区硬门槛无法用参数调优绕开（EMEA 结构性 ≤0.77）。**单区域没有子区门槛**，
+把同一信号迁到 EUR 即可通过。实测 47 次 FULL 仿真后得出 4 条可复用规律：
+
+1. **冠军公式**（EUR/TOP2500/delay1/decay5/SUBINDUSTRY/trunc0.08，S=1.85 F=1.27 TO=17.3%，GATE_OK=True）：
+   ```
+   group_neutralize(vector_neut(
+       rank(ts_arg_min(ts_backfill(star_val_sector_rank,60),60)),
+       rank(ts_mean(ts_delta(ts_backfill(mdl26_market_cap_u,2),1),10))
+   ), subindustry)
+   ```
+   `star_val_sector_rank` 属 `model38`（行业内估值排名 1-100）。GLB 上该式 S=1.85/F=0.99，
+   迁 EUR 后同样成立；**但迁 AMR(S 0.68)/ASI(JPN 0.47) 均失败 → 该信号是 EUR 专属**。
+2. **`vector_neut` 的市值 delta 腿既是 alpha 来源也是换手源头**：删掉它 S 1.85→0.90 直接失效；
+   保留但加 `ts_mean(...,10)` 平滑 → TO 26.25%→15.7%、F 0.78→0.98。**只钝化对冲腿、不拖慢主信号**，
+   这是唯一能同时保住 Sharpe 和降 TO 的手段。
+3. **`ts_arg_min` 窗口 120→60 是决定性一击**：S 1.51→1.85、F 0.98→1.27。邻域 a45/a75 因子宇宙
+   检查(0.91/0.95、0.85/0.86)失败，说明 a60 是真实最优点而非参数巧合。
+4. **两条看似合理但实测无效的降 TO 手段**（勿再试）：
+   - **`hump(alpha, 0.01)` 会彻底杀死 rank 化信号**（S 1.64→0.08，TO 压到 0.77%）——
+     rank 归一化后数值太小，hump 门槛吞掉几乎全部调仓。hump 只适用于未归一化的原始信号。
+   - **提高 decay 降 TO 会同步杀 Sharpe**（d5→d10：TO 26.3%→15.2% 但 S 1.64→1.31），
+     与 GLB 上"decay 伤 EMEA"是同一现象的两种表现：该信号衰减快。
+   - 缩小宇宙同样无效：EUR/TOP2500 S=1.64，TOP1200→0.66，TOP800→0.59。
+
+**八、区域代码集合与"冷门 ≠ 有效"**
+
+- **`/regions` 端点不存在（404）**，`/simulations/settings` 也 404。取合法区域只能从字段元数据
+  `GET /data-fields/{id}` 的 `data[]` 条目里收集 `region` 字段，实测全集仅：
+  `USA EUR ASI CHN KOR HKG GLB AMR IND GBR DEU ALL`。**没有 "ARC"** —— 社区文章标题里的
+  "ARC/GLB" 中 ARC 不是合法 region（最接近的是 AMR），照抄会 400。
+- **冷门度必须用 alphaCount 实测，"低 alphaCount" 不等于有信号**：
+  `star_val_sector_rank` 在 AMR/TOP600 仅 256 个 alpha、EUR/TOP800 仅 239 个（极冷门），
+  但实测 Sharpe 只有 0.68 / 0.59；真正可用的是 EUR/TOP2500（该字段已有 19,800 个 alpha，**很拥挤**）。
+  ⇒ 冷门字段要配大宇宙才活；拥挤度风险留给 `PROD_CORRELATION` 用公式形态去区分，不能靠缩宇宙解决。
+
+**九、多仿真的"可变参数"边界（省额度的关键）**
+
+`MULTI_SIM_INVARIANT` 只有 5 项：`type / instrumentType / region / delay / language`。
+**`universe` / `neutralization` / `decay` / `truncation` 在同一批内可以不同** —— 所以一次多仿真
+就能扫完"同区域 × 多宇宙 × 多 decay"的参数网格；但**跨 region 不能同批**（报
+`多仿真 region 不一致: AMR != EUR`），必须按 region 分组后再各自 `run_many`。
+
+**十、本地 `gate_report` 通过 ≠ 能提交（2026-11 实测，代价是一次提交额度）**
+
+同一个 check 在仿真后的 `is.checks` 里可能是 `WARNING`，但**提交时会被重新裁定为 `FAIL`**。
+实测 `JjeGme5m`（EUR，S=1.80 F=1.26 TO=16.0%）：
+
+| 检查项 | 本地 `is.checks` | 提交 403 判定书 |
+|---|---|---|
+| `IS_LADDER_SHARPE` | WARNING 0.88 / 1.58 | **FAIL 0.88 / 1.58** |
+| `PROD_CORRELATION` | PENDING | **FAIL 0.8314 / 0.7** |
+| `SELF_CORRELATION` | PENDING | PASS（无值） |
+| `REGULAR_SUBMISSION` | PENDING | PASS 0 / 4 |
+
+⇒ **`gate_report` 返回 True 只是必要条件，不是充分条件。** 提交前必须自己按最严口径预判：
+`IS_LADDER_SHARPE` 低于 limit 一律当作 FAIL（别信 WARNING），`PROD_CORRELATION` 只要信号族
+是拥挤的估值类（如 STAR 估值排名，EUR 已有 19,800 个 alpha 在用）就默认会 >0.7。
+再补两条实测参考值：**EUR 式 vector_neut(估值, 市值delta) 的 prod corr = 0.8314**；
+EBITDA/EV = 0.7785；短周期反转 = 0.9673。这三族在全局池都已饱和。
+
+> **代码已按这条教训改过（2026-11-03）**：`gate_report(strict=True)` 现为默认，
+> `STRICT_BLOCKING_CHECKS`（`IS_LADDER_SHARPE`/`LOW_2Y_SHARPE`）在 `WARNING` 且
+> `value < limit` 时直接判阻断；`preflight.py` 在其之上再加拥挤度先验，一条命令出 GO/NO-GO。
+> 要复盘旧口径请显式传 `strict=False`。
+
+**十一、提交被拒后如何拿到判定书（别用长轮询）**
+
+`POST /alphas/{id}/submit` 在提交计算期间返回 **`200` + `Retry-After: 1.0` + 空 body + 无 Location**，
+此时 alpha 仍是 `UNSUBMITTED`、`dateSubmitted` 仍是 `None`。正确做法是**按 Retry-After 反复 POST 同一个
+submit 端点**，直到拿到 `403`（判定书，body 里是完整 checks）或 `201`（接受）。
+实测约 **38 次 / 90 秒**才落地判定结果 —— 任何基于 `GET /alphas/{id}` 的固定间隔长轮询
+（旧签名 `submit_verified(polls=20, interval=10)`，200 秒**不够**）都会误判成"201 吞提交"。
+注意 `GET /alphas/{id}/submit` 会一直返回同样的 200+Retry-After，读不到结果；
+`POST /alphas/{id}/check` 是 405。
+
+> **代码已重写（2026-11-03，2026-11-04 补中途状态检查）**：
+> `submit_verified(brain, alpha_id, max_posts=100, max_wait=300, status_check_every=5)`
+> 是「反复 POST + 按 Retry-After 退避」，命中 403 立刻解析判定书，不再 GET 轮询；
+> 同时每 5 次 POST 查一次 alpha 状态，成功转 `ACTIVE` 就提前收工（见 §7.7.2 坑五）。
+> 判定书解析用 `submit_verdict_checks()`，可区分「相关性 FAIL」与「真的配额耗尽」。
+
 ### 5.2 IS 检查清单（真实 check 名称，2026-09 顾问面板实测）
 
 | 检查项 | 阈值 | 失败原因 | 修复方法 |
@@ -685,7 +788,7 @@ USA/D1 的 alpha 永远进不了这个池（它的 turnover/pyramid 主题只会
 | HIGH_TURNOVER | ≤ 70% | 换手爆炸 | 增大 decay、trade_when、混合 |
 | CONCENTRATED_WEIGHT | 单股 < 10% 且分散 | 权重集中 | 用 rank()、降低 truncation、ts_backfill |
 | LOW_SUB_UNIVERSE_SHARPE | TOPXXX：`subU_Sharpe ≥ 0.75·√(size_ratio)·Sharpe` | 小票依赖 | 用基本面、SUBINDUSTRY、避免市值倾斜 |
-| **IS_LADDER_SHARPE** | 分年阶梯（D1 FAIL 1.59；见 5.2.1） | 近年 Sharpe 衰减 | 提高近年表现；TO<30% 时 PASS 阈值×0.85 |
+| **IS_LADDER_SHARPE** | 分年阶梯（D1 FAIL 1.59；见 5.2.1） | 近年 Sharpe 衰减 | 提高近年表现；TO<30% 时 PASS 阈值×0.85。⚠️ 仿真后可能只标 `WARNING`，**提交时按 FAIL 判**，看数值不看标签（§9.0） |
 | **LOW_2Y_SHARPE** | 近 2 年 Sharpe ≥ 1.58（D1） | 近年失效 | 同上 |
 | **SELF_CORRELATION** | 0.7（信号级） | 与已提交 alpha 太像 | 换信号簇/换数据源；不要只调参数 |
 | **PROD_CORRELATION** | 0.7（对 PROD 池） | 与生产池太像 | 顾问独有，**本地护栏完全无法预测**（见下） |
@@ -768,7 +871,10 @@ USA/D1 的 alpha 永远进不了这个池（它的 turnover/pyramid 主题只会
 | 重复仿真 | 无 | `SimulationCache`（payload sha256 去重，JSONL 落盘） |
 | 拉 alpha 列表 | 拉全量 500+ 再本地筛 | 服务端 `?status=ACTIVE` 过滤 |
 | PnL 对齐 | 要求两条序列等长 | 按**日期交集**对齐后算相关 |
-| 提交确认 | 只看 201 | 轮询至 `ACTIVE`，并单独判 `SELF_CORRELATION`/`PROD_CORRELATION` |
+| 提交确认 | 只看 201 | 反复 POST 至 403 判定书 / 201，再确认 `ACTIVE`（§7.7.2） |
+| 提交闸门 | `gate_report` 放行 WARNING | `gate_report(strict=True)` + `scripts/preflight.py` 出 GO/NO-GO（§9） |
+| 多仿真分批 | 跨 region 直接报错 | `run_many` 按 5 项不变项自动分组（§7.4） |
+| 字段可用性 | 读顶层 `regions`（永远空） | `field_coverage()` / `field_regions()` / `fields_of_dataset()`（§7.10） |
 
 ```python
 import sys; sys.path.insert(0, "scripts")
@@ -1004,11 +1110,15 @@ for child_id in parent.children:
 
 约束（违反即 400 或资源错误）：
 
-1. 一批 2..10 个；**同批内 `type`/`instrumentType`/`region`/`delay`/`language` 必须一致**（`BrainSession.simulate_multi` 会前置校验）。
+1. 一批 2..10 个；**同批内 `type`/`instrumentType`/`region`/`delay`/`language` 必须一致**。
 2. 报 `The simulation requires more resources than are available` 时，减小批内数量重试。
 3. 每个子仿真都会计入当日额度——多仿真不省额度，只省你等的时间。
 
 `brain.run_many(payloads, batch_size=8)` 已封装切片与串行，直接用即可。
+**它会按上面那 5 项自动分组**：跨 region / 跨 delay 的 payload 混在一个 list 里也不会整批失败
+（实测跨 region 混排会让整轮研究脚本在提交阶段 1 秒内死掉，白等一次），返回顺序与入参严格一致。
+`universe` / `neutralization` / `decay` / `truncation` 同批可以不同 —— 所以一次多仿真就能扫完
+"同区域 × 多宇宙 × 多 decay" 的参数网格。
 
 ### 7.5 每日额度与限流
 
@@ -1076,11 +1186,17 @@ brain.prod_correlation(alpha)
 
 | 返回 | 含义 | 处置 |
 |------|------|------|
-| 200 / 201 | 请求被接受，**但不等于进了审核队列** | 继续核验 `dateSubmitted` 非 None 且 status 离开 `UNSUBMITTED` |
+| 200 + `Retry-After` + 空 body | **还在算**（不是失败） | 按 `Retry-After` **反复 POST 同一端点**，实测约 38 次 / 90 秒出结果 |
+| 201 | 请求被接受，**但不等于进了审核队列** | 核验 `dateSubmitted` 非 None 且 status 离开 `UNSUBMITTED` |
 | 429 | 软限频 | 读 `Retry-After` 退避后重试 |
-| 403 | **两类**：① 提交配额耗尽（硬封锁）；② **相关性 FAIL 的判定书** | 先解析 body（见坑二），再决定是等配额还是换信号 |
+| 403 | **两类**：① 提交配额耗尽（硬封锁）；② **相关性/阶梯 FAIL 的判定书** | 先解析 body（见坑二），再决定是等配额还是换信号 |
 
-**坑一：201 吞提交（静默丢弃）** — 返回 201，但 `dateSubmitted` 恒为 `None`、status 卡 `UNSUBMITTED`、`SELF_CORRELATION` 一直 `PENDING`。这表示提交被丢弃、alpha 从未进队列。**正确处置：再 POST 一次**——第二次通常返回 403，其响应体就是带真实数值的最终判定（见坑二）。`submit_verified` 已内置这一步，返回 `submit_blocked(...)`。
+**坑一：把"还在算"误判成"吞提交"（2026-11-03 修正）** — 提交计算期间 `POST /submit` 持续返回
+`200 + Retry-After + 空 body + 无 Location`，此时 alpha 仍 `UNSUBMITTED`、`dateSubmitted=None`。
+旧实现用固定间隔 `GET /alphas/{id}` 轮询 200 秒，超时后误报"201 吞提交"。
+**正确做法是反复 POST same endpoint**；`GET /alphas/{id}/submit` 会一直返回同样的 200+Retry-After
+（读不到结果），`POST /alphas/{id}/check` 是 405。`submit_verified(max_posts=100, max_wait=300)`
+已按此重写，命中 403 立刻解析判定书。
 
 **坑二：403 ≠ 一定是配额耗尽（2026-10-30 修正）** — 403 响应体形如 `{"is": {"checks": [...]}}`，是**提交时实时计算**的完整 IS checks。实测 `E560gqE1` 的 403 body 里：`PROD_CORRELATION FAIL value=0.8045 limit=0.7`、`SELF_CORRELATION PASS 0.6226`、`REGULAR_SUBMISSION PASS value=0 limit=4`——配额根本没用完，FAIL 的是生产池相关。
 
@@ -1092,6 +1208,20 @@ detail = submit_verdict(resp)   # "PROD_CORRELATION=0.8045(limit=0.7)" 或 ""（
 这是**唯一**能拿到相关性真实数值的途径：`is.prodCorrelation` 在 ACTIVE alpha 上恒为 `0.0`（平台不回算，与 `POWER_POOL_CORRELATION` 同为僵尸字段），轮询一万年也读不到。因此 403 必须先解析 body，只有 body 里没有 FAIL 项时才是真的配额耗尽。
 
 **坑三：`/alphas` 集合端点对部分账号返回 405** — 既不能 `GET` 枚举，也不能 `POST` 建 alpha；只能 `GET /alphas/{id}` 按 id 查。此时"提交前拉全部 alpha 算日收益相关"不可行，只能依赖信号成分重叠护栏 + BRAIN 自己的信号级相关性。`BrainSession.alphas()` 遇到 405 会抛错，请捕获后退化为按 id 查。
+
+**坑四：PASS 时永远读不到 `PROD_CORRELATION` 的数值（2026-11-04）** — 判定书只在
+**FAIL** 时回传 `PROD_CORRELATION=0.7621(limit=0.7)`；一旦 PASS，alpha 直接转 `ACTIVE`，
+`is.prodCorrelation` 依旧是 `0.0`。所以：
+- 能拿到的只有"FAIL 时的具体数值"和"PASS 这个事实"，**没有 PASS 时的数值**；
+- 打靶时把 FAIL 的数值当进度条用（例如 0.7621 → 0.7510 → 0.7155），不要指望提交成功后能验收具体值；
+- 反过来也意味着**"我这条 alpha 的 prod corr 是多少"这个问题，在过线之后无法回答**，别在报告里编数字。
+
+**坑五：成功提交的 POST 次数远多于失败（约 40–80 次）** — 2026-11-04 实测 `ZYQbbVnj`：
+POST#1 起 201→200 交替、POST#11 后 `Retry-After` 变 `None`、一直到 POST#80 全部 `200`，
+最后 `GET /alphas/{id}` 才显示 `status=ACTIVE, dateSubmitted=2026-11-04T03:47:19`。
+而 FAIL 的 alpha 通常在 1–3 次 POST 内就给 403。⇒ **`max_posts` 别设太小**（≥60），
+且循环内应每 5–10 次 POST 顺手 `GET /alphas/{id}` 一次，见到 `ACTIVE`/`dateSubmitted` 立刻收工，
+否则成功路径会白烧掉全部 POST 额度（`submit_verified` 已按此加了中途状态检查）。
 
 ### 7.8 重复仿真去重（省额度）
 
@@ -1200,7 +1330,83 @@ s.get("https://api.worldquantbrain.com/authentication/support",   # 3) 唯一的
 
 配置要点：`command` 用**装了 cnhkmcp 的那个 venv 的 python 绝对路径**，`args` 指向包内 `platform_functions.py`；包路径用 `python -c "import cnhkmcp,os;print(os.path.dirname(cnhkmcp.__file__))"` 查。远程 MCP 在多数客户端写 `url`，**Antigravity 例外，必须写 `serverUrl`**（写错不报错、只是加载不到工具）。前置依赖：Python ≥3.8、pandas、selenium、**本机 Chrome**（`search_forum_posts` 用）；wheel 约 79 MB。仓库 `github.com/cnhk/cnhkmcp` 已 404，只剩 PyPI 可装 —— 属于把平台账号密码交给第三方代码，自行评估。
 
-### 7.10 常见 API 错误
+### 7.10 字段可用性探测（区域 × 宇宙 × 拥挤度）
+
+三个问题都有唯一可靠答案，别再靠猜：
+
+```python
+from wq_api import field_coverage, field_regions, field_availability, fields_of_dataset
+
+# 1) 这个字段在哪些 region/universe/delay 能用？（元数据在 data[] 里，不在顶层）
+field_coverage(brain, "star_val_sector_rank")
+
+# 2) 平台到底有哪几个合法 region 代码？（没有 /regions 端点，只能这样反推）
+field_regions(brain, ["returns", "mdl26_market_cap_u"])
+# -> USA EUR ASI CHN KOR HKG GLB AMR IND GBR DEU ALL   （没有 "ARC"）
+
+# 3) 某宇宙下的覆盖与拥挤度（alphaCount）
+field_availability(brain, "star_val_sector_rank", region="EUR", universe="TOP2500", delay=1)
+
+# 4) 某 dataset 下有哪些字段（**必须带 instrumentType=EQUITY**）
+fields_of_dataset(brain, "model38", region="EUR", universe="TOP2500", delay=1)
+```
+
+三个已踩过的坑：
+
+| 坑 | 症状 | 真相 |
+|---|---|---|
+| 读顶层 `regions` 属性 | 永远为空 ⇒ 误判"字段不可用" | 按 region 的条目在 `data[]` 数组里 |
+| `GET /regions`、`GET /simulations/settings` | 404 | 平台没有区域枚举端点，只能用字段元数据反推 |
+| `GET /data-fields?dataset.id=X` 漏 `instrumentType=EQUITY` | `400 Invalid query`（不是空数组） | 该参数是硬必填，漏了会误判成"数据集在本地域不可用" |
+| `GET /data-fields&limit=200` | `400 Invalid query` | **`limit` 上限是 50**；必须用 `offset` 翻页（2026-11-04 实测） |
+| 把响应当数组 | `TypeError` / 空 | 响应体是 `{"count": N, "results": [...]}`，翻页读 `results` |
+
+拥挤度（`alphaCount`）的用法见 §9.1——它是 `PROD_CORRELATION` 唯一可用的本地代理，
+但**低 alphaCount 不等于有信号**（§10 第 21 条）。
+
+#### 7.10.1 一次扫清某宇宙的全部字段（换族找腿的第一步）
+
+不要逐个 `fields_of_dataset` 试探——直接拉整个宇宙的字段元数据成本地快照，
+再在本地按 `dataset` / `category` / `type` / `coverage` / `alphaCount` 切。
+**`scripts/field_snapshot.py` 已经封装好翻页**（`limit=50` + `instrumentType=EQUITY`，
+落盘到 `references/fields_{region}_{universe}_delay{N}.json`）：
+
+```python
+from field_snapshot import load_snapshot, refresh_snapshot
+
+fields = load_snapshot("GBR", "TOP700", 1, brain=brain)   # 有快照就读、没有就自动拉
+# fields = refresh_snapshot(brain, "GBR", "TOP700", 1)   # 强制重拉（字段推进后）
+
+from collections import Counter
+print(len(fields), len({(f.get("dataset") or {}).get("id") for f in fields}))
+```
+
+按族分组 + 筛可混腿池：
+
+```python
+mat = [f for f in fields if f.get("type") == "MATRIX"]
+usable = [
+    f for f in mat
+    if (f.get("coverage") or 0) >= 0.5
+    and (f.get("alphaCount") or 9999) < 200
+    and (f.get("dataset") or {}).get("id") != "analyst_revision_horizons"  # 排除当前族
+]
+for ds, n in Counter((f.get("dataset") or {}).get("id") for f in usable).most_common():
+    print(f"{ds:30s} {n}")
+```
+
+GBR/TOP700/delay=1 实测：**10,000 字段 / 138 个 dataset / 6,094 个 MATRIX 字段**，
+其中 `coverage ≥ 0.5 且 alphaCount < 200` 的 MATRIX 字段 **1,750 个**——可混的池子很大，
+不要拿"没字段可换"当借口。
+
+**筛候选腿的四个硬条件**（顺序照抄，能砍掉 90% 噪音）：
+
+1. `type == "MATRIX"`（`VECTOR` 不能直接进 `rank()`/`ts_rank()`）
+2. `coverage ≥ 0.5`（< 0.3 基本模拟不出来，0.3~0.5 是稀疏噪音）
+3. `alphaCount < 500`（只在做拥挤度分级时用，**不是越冷越好**，§10 第 21 条）
+4. `dataset.id` **不是你当前骨架的族**（同族换字段名不算换族，§10 第 16 条）
+
+### 7.11 常见 API 错误
 
 | 现象 | 原因与处理 |
 |------|------------|
@@ -1252,26 +1458,174 @@ s.get("https://api.worldquantbrain.com/authentication/support",   # 3) 唯一的
 
 ---
 
-## 9. 提交前 Checklist
+### 8.4 换族混腿：把 `PROD_CORRELATION` 从 0.76 打到 0.70 以下
+
+> 2026-11-04，GBR/TOP700 价格反转骨架 `O0ANYnG1`，IS checks 全 PASS 但
+> `PROD_CORRELATION 0.7621 / 0.7` 一次提交即 403，**1 次 POST 出结果、配额未消耗**。
+> 该族（"GBR 大盘价格反转"）在全局生产池已拥挤，同族短周期反转参考值 **0.9673**。
+
+#### 8.4.1 为什么只有"换族"有效
+
+`PROD_CORRELATION` 是**按信号族（dataset × 经济逻辑）算的**，不是按你的数值相关性算的。
+所以：
+
+| 尝试过的动作 | 对 prod corr 的效果 |
+|---|---|
+| 换 `ts_rank` 窗口（22→126） | 0（只是 Sharpe 的杠杆） |
+| 换 decay / neutralization / truncation | ≈ 0 |
+| 同族换字段名（52 周高 → MA50 → 200 日均线） | ≈ 0（都是价格反转） |
+| **加一条不同 dataset 的腿**（`pattern_scores`） | **唯一有效，且可量化** |
+
+#### 8.4.2 五步 SOP
+
+1. **扫全字段**（§7.10.1）：`type=MATRIX` + `coverage ≥ 0.5` + `alphaCount < 500` + 非同族。
+2. **单腿 FULL 实测**（不是 QUICK，GBR 上 QUICK 系统性高 0.45，§5.1.4 ⑧）：
+   跨族腿**不要求单腿强**，只要能"加进来不拖后腿"。本次 20 条跨族候选里
+   只有 2 条单腿 S > 1.0（`pattern_scores` 的 `breakaway_gap_up_*`，S=1.11 / 1.05），
+   其余多在 0.3–0.7，直接当独立 alpha 都是废的——但作为混腿素材完全够用。
+3. **权重 sweep**：正交腿从 25% 起，按 5% 递增（25/30/35/40），价格腿按比例压缩。
+4. **双筛**：`IS_LADDER_SHARPE` 的 value ≥ limit **且** gate（S>1.58 / F>1.0 / TO 1–70%）同时 PASS 才进提交池。
+5. **按"预期 prod corr 最低"的顺序依次提交**，用 FAIL 数值当前进进度条。
+
+#### 8.4.3 实测权重梯度（同一骨架，只动权重与正交腿窗口）
+
+| Alpha | 表达式构成 | 价格族权重 | 正交腿 `ts_rank` 窗口 | FULL S | IS_LADDER | PROD_CORR |
+|---|---|---:|---:|---:|---|---:|
+| `O0ANYnG1` | 0.40 ftse + 0.30 52w + 0.30 MA50 | **100%** | — | 1.78 | PASS | **0.7621** |
+| `kqNo1nE6` | 4 腿：0.30/0.225/0.225 + 0.25 ps2 | 75% | 126 | 1.78 | PASS 2.12/2.02 | **0.7510** |
+| `omELnaov` | 0.40 ftse + 0.30 52w + 0.30 ps1 | 70% | 100 | 1.74 | PASS 1.81/1.75 | **0.7236** |
+| `Xg9b7z7a` | 同上 | 70% | 60 | 1.82 | PASS 1.84/1.75 | **0.7232** |
+| `JjeN5nrO` | 同上 | 70% | 126 | 1.73 | PASS 1.80/1.75 | **0.7184** |
+| `mLomgpd5` | 同上 | 70% | 252 | 1.80 | PASS 2.09/2.02 | **0.7155** |
+| `ZYQbbVnj` ✅ | 0.325 ftse + 0.325 52w + **0.35 ps1** | **65%** | 252 | 1.78 | PASS 2.07/2.02 | **PASS（<0.70）** |
+
+读法：
+
+- **权重→corr 是凸的（这是最反直觉的一条）**：100%→75% 只降 **0.0111**（几乎无效），
+  75%→65% 却降 **0.0355**（真正起作用的正是这一段）。所以"混一点点"不是"不够"，
+  而是**基本没用**；到 35% 正交重量才开始见效。
+- 换算成斜率：有效区间内 **≈ −0.03 / 5 个百分点**（走廊值），别按线性外推。
+- **正交腿的 `ts_rank` 窗口越长，prod corr 越低**（60/100/126/252 → 0.7232/0.7236/0.7184/0.7155），
+  而 Sharpe 反而略升（1.73→1.80）。加长窗口 = 让这条腿更像"慢变量"，与价格反转的高频结构脱钩。
+- **过线那一刻还压了最拥挤那条腿**：ftse 腿 0.40 → 0.325，同时 52 周腿 0.30 → 0.325。
+  即在"总价格权重"之外，**单条最拥挤腿的权重也是一个旋钮**。
+
+#### 8.4.4 双约束：65% 是唯一可行的一小段窗口
+
+降价格权重既能降 corr，也会**直接打死 `IS_LADDER_SHARPE`**（顾问面板必查）：
+
+| 价格族权重 | 65% | 60% | 55% | 50% |
+|---|---:|---:|---:|---:|
+| FULL S | 1.78 | 1.76 | 1.74 | 1.72 |
+| IS_LADDER value / limit | **2.07 / 2.02 ✅** | 1.56 / 1.58 ❌ | 1.53 / 1.58 ❌ | 1.49 / 1.58 ❌ |
+
+⇒ **`PROD_CORRELATION` 要 ≤ 0.70，`IS_LADDER_SHARPE` 要 ≥ 1.58，两者的可行交集只有 65%~70%**。
+Sharpe 看起来只掉 0.06，但 ladder 是断崖式 FAIL——所以**不能靠继续压权重蒙过去**，
+要么把正交腿本身做强（换更好的族/更好的算子），要么接受这一族暂时交不出去。
+
+#### 8.4.5 反例：不是所有"非价格腿"都能混
+
+同一骨架上换别的族，直接崩：
+
+| 混入的族 | 结构 | FULL S | IS_LADDER | 判断 |
+|---|---|---:|---|---|
+| `pattern_scores`（ps1） | 0.325/0.325/0.35 | **1.78** | PASS | ✅ 唯一可用 |
+| `model250`（ML 综合分）+ ps1 | 4 腿 0.25×4 | **0.72** | FAIL 0.08 | ❌ 灾难，ML 分与价格反转反向抵消 |
+| 只留 1 条价格腿 + 2 条 pattern | 0.45/0.30/0.25 | 1.52 | FAIL 1.28 | ❌ 打散过头 |
+| pattern 腿套 `group_rank` | 0.40/0.30/0.30 | 1.60 | FAIL 1.43 | ❌ 额外中性化吃掉信号 |
+| 换 pattern 字段（`adaptive_similarity`） | 0.40/0.30/0.30 | 1.50 | FAIL 1.47 | ❌ 同族里也有强弱之分 |
+
+⇒ 换族要**先用单腿 FULL 实测排座次**，再混；不要以为"只要不是价格的就行"。
+
+#### 8.4.6 GBR/TOP700 可用族地图（138 个 dataset 里的关键几张）
+
+| dataset | category | 可作混腿的字段 | 单腿 FULL S |
+|---|---|---|---:|
+| `analyst_revision_horizons` | model | `price_change_vs_ftse100_30d_*`、`pct_change_from_52week_high_long_term`、`pct_diff_*moving_average*` | 1.32–1.54 |
+| **`pattern_scores`** | **pv** | `breakaway_gap_up_mean_simscore_lookback60`、`breakaway_gap_up_dynamic_simscore_lookback60` | **1.11 / 1.05** |
+| `model250` | model | `mdl250_lmt_open_eq_score` | 0.46（混进去崩） |
+| `model36` / `model53` | model | `credit_risk_leverage_score_d1`、`default_risk_*` | 0.3–0.7 |
+| `model238` | model | `mdl238_region_owner_rank`、`mdl238_sector_rank` | 0.3–0.7 |
+| `model109` | model | `debt_to_market_cap_ratio`、`float_turnover_ratio` | 0.3–0.7 |
+| `shortinterest*` / `institutions*` / `insider_agg_matrix` | model | `mean_loan_rate`、`count_institutional_holders_security` 等 | 0.3–0.7 |
+| `fundamental72` / `continuation_score` | fundamental / pv | 覆盖率不足，GBR 上多不可用 | — |
+
+> 这张表只对 GBR/TOP700/delay=1 成立；换区域要重扫（§7.10.1）。
+
+---
+
+## 9. 提交硬闸门与 Checklist
+
+### 9.0 先记住：指标全绿 ≠ 能提交
+
+2026-11-03 实测（代价是 1 次提交额度）：一条 EUR alpha `Sharpe 1.80 / Fitness 1.26 / TO 16.02%`，
+本地 `gate_report` 判定 True，提交仍被拒。原因是**三道本地看不见的闸门**：
+
+| 闸门 | 仿真后看到的样子 | 提交时的真身 | 能否本地预判 |
+|---|---|---|---|
+| `IS_LADDER_SHARPE` | `WARNING 0.88 / 1.58` | **`FAIL 0.88 / 1.58`** | 能——按 value<limit 一律当 FAIL |
+| `PROD_CORRELATION` | `PENDING`（无值） | `FAIL 0.8314 / 0.7` | 不能——只能用**拥挤度先验**估风险 |
+| `REGULAR_SUBMISSION` | `PENDING` | PASS 0 / 4（消耗配额） | 不能——只能记账 |
+
+⇒ **`gate_report` 返回 True 只是必要条件。** 顺序应该是：`preflight.py` 判 GO → 再花额度。
+
+### 9.1 一条命令：`scripts/preflight.py`
+
+```bash
+# 判定若干候选（联网，会查拥挤度先验）
+python scripts/preflight.py RREmY1Qe KPJG6Jwj
+
+# 从研究结果批量判定
+python scripts/preflight.py --from-json .workbuddy/eur_mine3.json
+
+# 机器可读 / 跳过拥挤度查询
+python scripts/preflight.py RREmY1Qe --json --skip-crowding
+```
+
+退出码 `0` = 至少一个 GO，`1` = 全部 NO-GO。判定口径：
+
+| 项 | 口径 |
+|---|---|
+| Sharpe / Fitness / Turnover | 按账号权限取阈值（顾问 D1 为 1.58 / 1.0 / 1%–70%） |
+| `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE` | **WARNING 且 value < limit ⇒ 阻断**（不信 WARNING） |
+| `LOW_SUB_UNIVERSE_SHARPE` / `CONCENTRATED_WEIGHT` / `OLD_SIMULATION` | FAIL/ERROR ⇒ 阻断 |
+| `SELF_/PROD_/POWER_POOL_CORRELATION` | 恒 PENDING ⇒ 只作提示，绝不当作 0 |
+| 拥挤度先验 | 信号字段 alphaCount ≥ 5000 ⇒ 阻断；1000–4999 ⇒ 提示；< 1000 ⇒ 提示"冷门≠有效" |
+
+**拥挤度先验的标定**（同一字段 `star_val_sector_rank`，同一账户）：
+`EUR/TOP2500 alphaCount=19,800` → `PROD_CORRELATION 0.8314` FAIL；
+`AMR/TOP600 alphaCount=256` → 未触及相关性闸门。所以它是风险分级，不是概率预测。
+
+> 已知其他族的 prod corr 实测值：EBITDA/EV **0.7785**、短周期反转 **0.9673**、
+> `vector_neut(估值, 市值delta)` **0.8314**、GBR 大盘价格反转（ftse100 相对 + 52 周高 + MA50）**0.7621**。
+> 这几族在全局池已饱和，别再投裸版本；要用就先按 §8.4 混进 ≥35% 的正交族重量。
+
+### 9.2 Checklist
+
+**Step 1 — 硬闸门（不过就别提交）**
+
+- [ ] `python scripts/preflight.py <alpha_id>` 返回 **GO**
+- [ ] `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE` 的 value ≥ limit（**不看 result 标签，看数值**）
+- [ ] 信号字段所在宇宙的 alphaCount < 5000（否则 prod corr 大概率 > 0.7）
+- [ ] 信号族不在 §9.1 的"饱和族"名单里；**若在，先按 §8.4 混 ≥35% 正交族**，否则 403 是必然
+
+**Step 2 — 构造与仿真**
 
 - [ ] 已运行 `recommend_fields.py`，信号字段从低拥挤字段池中选取
 - [ ] 每个信号字段已写出一句话经济学解释（`--field-rationale`）
 - [ ] `simulate_batch.py` 静态检查通过（无高 alphaCount 字段、无 ACTIVE 池已用字段）
-- [ ] 已获取 **所有** alpha 列表（含 ACTIVE / UNSUBMITTED），不只是本次模拟
-- [ ] 新因子与已有 ACTIVE alpha **日收益** 相关性 < 0.7（或新 Sharpe ≥ 旧 Sharpe × 1.1）
-- [ ] 相关性基于 **日收益** 计算、**按日期交集对齐**，不是累计 PnL
-- [ ] 字段已验证
-- [ ] 若套用模板：模板信号字段与用户给定字段**同一 dataset**（4.1.1 硬门槛），不一致 = 混信号，已停止执行
-- [ ] 模拟无报错；`checks` 里没有 `OLD_SIMULATION = FAIL`（否则先重模拟）
-- [ ] Sharpe ≥ **1.58**（顾问 D1）/ ≥ **2.69**（顾问 D0），普通账号 ≥ 1.25
-- [ ] Fitness ≥ **1.0**（顾问 D1）/ ≥ **1.5**（顾问 D0）
-- [ ] Turnover 1%–70%（SuperAlpha 2%–40%）
+- [ ] 若套用模板：模板信号字段与用户给定字段**同一 dataset**（4.1.1 硬门槛）
+- [ ] `checks` 里没有 `OLD_SIMULATION = FAIL`（否则先重模拟；实测存货重跑 9/9 全灭）
+- [ ] `CONCENTRATED_WEIGHT` PASS（单股 < 10%），多空数量合理
 - [ ] Drawdown < 15%
-- [ ] `LOW_SHARPE` / `LOW_FITNESS` / `LOW_SUB_UNIVERSE_SHARPE` / `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE` 全 PASS
-- [ ] `CONCENTRATED_WEIGHT` PASS（单股 < 10%）
-- [ ] 多空数量合理
-- [ ] 提交后 **再次确认 status == ACTIVE**，201 不代表上线
-- [ ] 检查 `SELF_CORRELATION` 与 `PROD_CORRELATION`（顾问）均未 FAIL
+
+**Step 3 — 提交与确认**
+
+- [ ] 已获取**所有** alpha（含 ACTIVE / UNSUBMITTED），而非只有本次模拟
+- [ ] 新因子与已有 ACTIVE alpha **日收益**相关性 < 0.7（按日期交集对齐，不是累计 PnL）
+- [ ] 提交用 `submit_verified()`（内部反复 POST，成功路径要 40–80 次，见 §7.7.2 坑五；`max_posts ≥ 60`）
+- [ ] 提交后 **再次确认 `status == ACTIVE`**，201/200 都不代表上线
+- [ ] 若被 `PROD_CORRELATION` 拦，**记下 FAIL 数值**当下一轮的进度条（0.7621→0.7510→0.7155 是实测梯度），换族混腿后再提
 
 ---
 
@@ -1284,7 +1638,7 @@ s.get("https://api.worldquantbrain.com/authentication/support",   # 3) 唯一的
 5. **group_rank + ts_rank 是黄金组合**。
 6. **SUBINDUSTRY 中性化通过率最高**。
 7. **Decay 是控制换手的主杠杆**：基本面 0，技术 10–30。
-8. **50/50 正交混合能降低换手，但未必能降低相关**；相关靠信号来源，不靠权重。
+8. **50/50 正交混合能降低换手，但未必能降低相关**。要分两种相关看：**`SELF_CORRELATION` 是同族内信号级相关，权重与窗口基本无效，只能换族**；**`PROD_CORRELATION` 是跨族池相关，正交族权重反而是有刻度的旋钮**（每 5% ≈ −0.03，§8.4.3）。
 9. **字段先验证**，无效字段秒级报错。
 10. **USA TOP3000 里真正的低相关很难做**；同一数据池的 "不同" 表达式往往高度相关。
 11. **套模板先过数据集一致性门槛（4.1.1）**：模板信号字段与用户给定字段不同 dataset = 混信号，立即停止，不模拟不提交。
@@ -1294,6 +1648,19 @@ s.get("https://api.worldquantbrain.com/authentication/support",   # 3) 唯一的
 15. **Fitness 贴线时先换 neutralization，不要先动 decay**：`Fitness = Sharpe × √(Returns / max(TO, 0.125))`（已用 6 条真实仿真反算校准）。TO < 12.5% 时分母被地板锁死，降 TO 零收益；此时 SUBINDUSTRY→INDUSTRY 是性价比最高的一刀（实测 F 0.95→1.08）。decay 只在 TO 已 >12.5% 时才值得动。
 16. **腿的独占性按「数据族」判，不按「字段名」判**：换期限（90/120/180/270）、换口径（call-put skew / mean_skew / pcr_oi）都逃不出同一族的 SELF_CORRELATION（实测与同族 alpha 相关仍 0.70–0.94）。要降相关就必须换到池内无人用的数据族。
 17. **先清点存货，但别信存货的旧指标**：`scripts/template_hitrate.py --stock` 能免费列出历史库里「曾过门槛但仍 UNSUBMITTED」的 alpha（2026-10-30 实测 9 条），值得先扫一遍；但**这些指标只在仿真当时成立**。实测把这 9 条按原样重跑，平均 −0.42 Sharpe、**9/9 全灭**。所以存货的正确用法是：拿它的**表达式当新因子的候选骨架**，而不是当成能直接提交的资产；只要 `OLD_SIMULATION=FAIL`，重跑就是要花额度的，且大概率掉线（见 §12 2026-10-30 第二条）。
+18. **`WARNING` 在提交时会被重新裁定为 `FAIL`**：`IS_LADDER_SHARPE` 仿真后是 WARNING 0.88/1.58，提交判定书里是 FAIL 0.88/1.58 —— 同一组 value/limit，两种裁定。所以**看数值，不看 result 标签**（§9.0）。
+19. **降换手要"只钝化对冲腿，不动主信号"**：对市值 delta 中性腿套 `ts_mean(...,10)`（TO 26.3%→15.7%、Fitness 0.78→0.98），再收窄主信号窗口（`ts_arg_min` 120→60，Sharpe 1.51→1.85）。反过来，提高 decay 降 TO 会同步杀 Sharpe（d5→d10：TO 26%→15% 但 S 1.64→1.31）——说明信号衰减快，平滑信号本身就是伤害。
+20. **`hump()` 会杀死 rank 化信号**：`hump(alpha, 0.01)` 把 TO 压到 0.8% 的同时把 Sharpe 从 1.64 打到 0.08。rank 后的数值量级太小，阈值吞掉了几乎全部调仓。压换手不要用它。
+21. **冷门 ≠ 有效，拥挤 ≠ 无效**：同一字段在 AMR/TOP600（256 个 alpha）Sharpe 0.68、EUR/TOP800（239 个）0.59，而在**很拥挤**的 EUR/TOP2500（19,800 个）有 1.64。冷门字段要配大宇宙才活；相关性风险留给公式形态去化解，不能靠缩宇宙。
+22. **多仿真按 5 项不变项分组**：`type/instrumentType/region/delay/language` 不同的 payload 不能同批，跨 region 混排会让整轮脚本在提交阶段 1 秒内死掉。`run_many` 已自动分桶，返回顺序仍与入参一致。
+23. **有些算子在某些区域根本不存在**：`ts_decay_exp_window`、`group_median` 在 GLB 不可用（unknown/inaccessible operator）。社区模板照抄前先用 QUICK 模式验证算子栈，别用 FULL 额度试错。
+24. **`PROD_CORRELATION` 是族级判定，不是数值相关性**：换窗口/换 decay/换同族字段名对它几乎没有影响；**唯一有效旋钮是「不同 dataset 的正交腿权重」**（完整 SOP 见 §8.4）。
+25. **同族权重与 prod corr 的映射是凸的**：100%→75% 只降 0.0111，75%→65% 降 0.0355。⇒"混一点点"基本无效，**要到 ≈35% 的正交重量才开始见效**；只在线性区段可近似 −0.03 / 5 个百分点。完整梯度见 §8.4.3。
+26. **降权重会同步打死 `IS_LADDER_SHARPE`，且是断崖式的**：65% 时 2.07/2.02 PASS，60% 时 1.56/1.58 FAIL，而 Sharpe 只从 1.78 掉到 1.76。⇒ prod corr 与 ladder 的可行交集很窄，别指望一路压权重压到过线（§8.4.4）。
+27. **正交腿的 `ts_rank` 窗口越长，prod corr 越低、Sharpe 反而略升**：60/126/252 → 0.7232/0.7184/0.7155（S 1.82/1.73/1.80）。慢变量更能与高频价格结构脱钩——这是免费的一刀。
+28. **跨族腿不要求单腿强**：20 条跨族候选里只有 2 条单腿 FULL S > 1.0，其余 0.3–0.7，但当混腿素材完全够用。**反过来，强腿不一定能混**：`model250` 的 ML 综合分（单腿 0.46）混进 4 腿骨架把 Sharpe 从 1.78 砸到 0.72。
+29. **成功提交的 POST 次数是失败的 20–80 倍**：FAIL 通常 1–3 次 POST 就给 403；成功要 40–80 次 200 才转 `ACTIVE`。`max_posts ≥ 60`，且循环内每 5–10 次查一次 `GET /alphas/{id}`，见 `ACTIVE` 立刻收工（§7.7.2 坑五）。
+30. **PASS 之后永远读不到 prod corr 的数值**：判定书只在 FAIL 时回传数字，ACTIVE 上 `is.prodCorrelation` 恒 0.0。报告里只能写"已过线"，不能写具体值（§7.7.2 坑四）。
 
 ---
 
@@ -1352,293 +1719,28 @@ python scripts/evolve_skill.py --max-pnl-fetch 30
 ### 11.4 数据结构
 
 - `alpha_db.json`：本地 alpha 快照库，包含状态、指标、表达式、PnL。该文件会包含个人研究记录，默认被 `.gitignore` 忽略，不应提交到公开仓库。
-- `SKILL.md`：最终人类可读 playbook，第 12 节只保留脱敏后的通用经验。
-
-## 12. 实证记录（自动更新）
-
-> 本节仅保留机制说明。真实运行生成的 alpha ID、表达式、PnL、提交状态和相关性记录可能关联个人账号与研究资产，默认写入本地 `alpha_db.json`，不随仓库发布。
-> 若需要沉淀通用经验，请人工汇总成脱敏规则后再写回第 4、5、6、8、10 节。
-
-### 2026-08-13 — cap 回归中性化模板挖掘（YPvlEl0l 提交 ACTIVE）
-
-用户模板（Pasted text #5，含 `regression_neut`/`vec_avg({data})`/`group_normalize`/`vec_count`/`rsk82_*` 等）：
-```
-regression_neut(regression_neut(group_neutralize(group_zscore(vec_avg({data}),sector),bucket(rank(cap),range="0.1,1,0.1")),group_neutralize(group_zscore(cap,sector),bucket(...))),ts_ir(returns-group_median(returns,sector),126))
-fear = ts_mean(abs(returns-group_mean(returns,1,market))/(abs(returns)+abs(group_mean(returns,1,market))+0.1),20);-group_neutralize(fear*group_normalize(ts_decay_exp_window(ts_percentage(vec_count(rsk82_...),60,percentage=0.9)-ts_percentage(vec_count({data}),60,percentage=0.1),20,factor=0.8),market)*inverse(abs(ts_entropy(volume,20))),bucket(rank(cap),range="0.1,1,0.1"))
-```
-USA TOP3000 delay=1 实证结论（`{data}` 占位符，用户建议试 ROE/现金流字段）：
-1. **模板算子大面积不可用**（逐个探针验证）：`regression_neut`、`group_normalize`、`vec_count`、`vec_avg`(标量)、`ts_ir`、`ts_percentage`、`ts_decay_exp_window`、`ts_entropy`、`inverse`、`group_median`、`sector` 字段均报 unknown operator/field。可用算子仅 rank/group_rank/ts_rank/ts_mean/group_zscore/group_neutralize/bucket/group_mean。
-2. **落地模板核心语义**：Part1 的「data 相对 cap 回归中性」用 `sig = group_zscore({data},subindustry) - group_zscore(cap,subindustry)`（cap zscore 相减近似回归中性）；`sector`→`subindustry`。Part2 的 fear 项依赖算子全不可用，放弃（且 Part1 相对收益分量 `ts_rank(returns-group_mean(returns,1,subindustry),126)` 实测负贡献，Sharpe 1.49→0.94）。
-3. **现金流字段最优**：`cashflow_op/equity`（经营现金流/equity）Sharpe 1.63/Fit 1.11/TO 7.6% 过线；`free_cash_flow_reported_value/equity` Fit 0.98 接近；ROE 类（`operating_income/equity`、`return_equity/close`）Fit 仅 0.86-0.88（Returns 4.4% 太低）。**现金流 > ROE**。
-4. **group_mean 需 3 参数**：`group_mean(x,1,group)`，写 `group_mean(returns,subindustry)` 会报 "Invalid number of inputs : 2, should be exactly 3"。
-5. 复杂多层 group 嵌套表达式模拟极慢（超 8 分钟超时），需精简到与上轮 GrGmXvwx 相当的结构复杂度（约 2 分钟跑完）。
-6. 最终提交（**YPvlEl0l ACTIVE**，Sharpe=1.63, Fit=1.11, Returns=5.8%, TO=7.6%, DD=3.0%，全部 IS check PASS，与 19 个 ACTIVE 最高日收益相关 +0.558 vs GrGmXvwx，唯一 ≥0.5 且 <0.7 可提交）：
-`group = bucket(rank(cap),range="0.1,1,0.1"); sig = group_zscore(cashflow_op/equity,subindustry) - group_zscore(cap,subindustry); group_neutralize(ts_mean(group_rank(ts_rank(sig,126),subindustry),2),group)`，Decay=10, Neutralize=INDUSTRY。
-7. SELF_CORRELATION 提交前显示 PENDING，提交后 status 立即 ACTIVE（提交即触发重新评估并 PASS）——不必等 PENDING 转 PASS 再提交。
-
----
-
-### 2026-08-13 — bucket(cap) × 期权 breakeven × OI 模板挖掘（GrGmXvwx 提交 ACTIVE）
-
-用户模板（含 `vec_min({Analyst Std})`/`vec_max({OptionHighPrice})` 占位符）：
-```
-group = bucket(rank(cap),range='0.1,1,0.1');
-risk = rank(-ts_av_diff(vec_min({Analyst Std}),360));
-alpha = rank((1-risk)*group_rank(ts_scale(vec_max({OptionHighPrice})/close,120),industry));
-group_neutralize(ts_mean(alpha,2),group)
-Decay=10, Neutralize=industry
-```
-USA TOP3000 delay=1 实证结论：
-1. **`vec_min`/`vec_max` 算子在本 universe 不可用**（"unknown operator"），`vec_avg` 仅接受事件输入——三者均需去除，直接用单字段。
-2. `{Analyst Std}` 用 analyst4 预期 std（如 `anl4_fs_detail_estimates_advanced_af_nd_epsr_std`、`..._basic_qf_v4_nd_eps_std`）；`{OptionHighPrice}` 用 Options Analytics 的 `call_breakeven_360/180/1080`（看涨盈亏平衡价/close，贴合"期权隐含高价"语义）效果最好，`forward_price_*` 极弱（Sharpe 0.03）。
-3. **risk 项（分析师分歧 ts_av_diff）在本模板是负贡献**：去掉 risk 项后 Sharpe 0.8→1.42；调低 risk 权重（0.3）反而更差。`bucket(rank(cap),range='0.1,1,0.1')` 市值分桶（剔除最小 10% 市值）+ `group_neutralize(ts_mean(alpha,2),group)` 结构保留有效。
-4. **关键提升是混合基本面**：`+ 0.5~0.7*group_rank(ts_rank(operating_income/equity,126),subindustry)`，权重 0.6 最优。
-5. 最终提交（**GrGmXvwx ACTIVE**，Sharpe=1.50, Fit=1.28, Returns=9.1%, TO=9.2%, DD=4.6%，全部 IS check PASS，与 18 个 ACTIVE 最高日收益相关 0.501）：
-`group = bucket(rank(cap),range='0.1,1,0.1'); sig = group_rank(ts_rank(call_breakeven_360/close,120),industry); alpha = rank(sig) + 0.6*group_rank(ts_rank(operating_income/equity,126),subindustry); group_neutralize(ts_mean(alpha,2),group)`，Decay=10, Neutralize=INDUSTRY。
-6. 纯期权 breakeven 信号本身只有 0.9 左右 Sharpe，不混合基本面无法过线——再次印证「期权/技术信号必须混合基本面」的经验。
-
----
-
-### 2026-08-16 — mdl77_2gdna_actrtn12m × ROE × 资产负债率（VkGQxanA / QPGRvdV5 提交 ACTIVE）
-
-用户指定字段 `mdl77_2gdna_actrtn12m`（想表达「低估+好盈利→做多」）。USA TOP3000 delay=1 实证结论：
-
-1. **新模型字段以 API 精确查询为准**：`GET /data-fields/{id}` 命中（Analysts' Factor Model, MATRIX, 12-Month Active Return with 1-Month Lag = t-13→t-1 价格变化）；本地字段快照（4367 个）不含 mdl77 系列与 `total_liabilities`/`total_assets`。search 端点对短词返回 400 "Invalid query"，精确查询更可靠。
-2. **MATRIX 字段可直接 rank/group_rank**：`mdl77_2gdna_actrtn12m`、`assets`、`liabilities` 均无需 vec_avg/ts_backfill 即可用于截面算子。
-3. **`trade_when(x, matrix_field<0, 1)` 会零交易**（longCount=0、TO=0）：MATRIX 与标量比较恒 False；条件需先转换，如 `rank(matrix_field)<0.5`。
-4. **12 个月滞后收益是动量不是低估**：正方向 `group_rank(mdl77_2gdna_actrtn12m,subindustry)` Sharpe 1.07；反转方向（做多跌得多的）无效（-0.22 到 0.47）——「做多被低估股」的直觉在 USA TOP3000 不成立。
-5. **低负债率单独是负 alpha（-0.72）**：高杠杆有正风险溢价；「低负债=稳健」只能作 ≤0.2 小权重质量过滤，不能当主信号。
-6. **ROE 分量已过载 + est_eps 是相关性炸弹**：ACTIVE 池至少 4 个 alpha 含 ROE（wpEr87Ax/MPGx5EZk/KPGLLpPE/pwN5e7KX），新 alpha ROE 权重 >0.3 必撞相关线（0.799）；`est_eps/close` 撞分析师簇（与 9q7nYrZe/blQ8Q7kN/MPGx5EZk 相关 0.69-0.74）。
-7. **降相关配方 = 独特信号高权重 + 过载信号低权重**：mdl77 动量与现有池不同源，权重 0.5-0.7；ROE 压到 0.3——相关从 0.799 降到 0.68。
-8. **提交判据**：模拟 8 checks 全 PASS + 日收益相关 <0.7 → 提交后 SELF_CORRELATION 基本一次过、90s 内 ACTIVE（两次提交 VkGQxanA、QPGRvdV5 均验证）。
-9. 提交 F（**VkGQxanA ACTIVE**，Sharpe=1.41, Fit=1.03, TO=6.3%, DD=6.4%，最高相关 0.678）：
-`0.3*group_rank(ts_rank(operating_income/equity,126),subindustry)+0.5*group_rank(mdl77_2gdna_actrtn12m,subindustry)+0.2*group_rank(-liabilities/assets,subindustry)`（decay=0, SUBINDUSTRY）
-10. 备选 E（**QPGRvdV5 提交**，Sharpe=1.44, Fit=1.17, TO=5.7%，最高相关 0.692）：`0.3*ROE+0.7*动量`（无负债率分量）。强指标版（0.6ROE+0.4动量 Sharpe 2.05、加 est_eps 后 2.58）均因相关 ≥0.74 被否。
-11. **SELF_CORRELATION 血泪教训（E 被拒 0.9622）**：E 与刚 ACTIVE 的 F（VkGQxanA）同簇（共享 0.3ROE + mdl77 主信号），F 先上线后 E 提交必撞 0.96。**对照池包含提交时刻所有 ACTIVE，刚提交的 alpha 立即成为冲突源**；多候选时先提交最优，其余同簇候选直接放弃，不要逐个试。提交豁免：新 Sharpe ≥ 冲突 alpha × 1.1 可过。
-12. **与已上线同簇 alpha 降相关的有效杠杆 = 换信号主导权**：mdl77 权重 0.7→0.2 + 反转（`rank(-(close-open)/open)`）权重 0.5，相关 0.962→<0.5；decay 反而让组合贴近旧 alpha 的慢信号形状（0.757→0.918）；换中性化/换 ROA 无效（0.933）。
-13. **反转分量 + decay=5 是 TO/Fitness 甜点**：`0.3*ROE+0.2*mdl77动量+0.5*反转` decay=5 → Sharpe 3.15/Fit 2.19/TO 34.3%（decay=0 时 TO 56%、Fitness 1.23）。反转主导组合（超跌+高ROE+弱趋势确认）本身就是「错杀好公司」的低相关实现。
-14. **SELF_CORRELATION 检查代码**：必须按**日期交集**对齐算日收益相关（位置对齐会低估相关）；PnL recordset 空结果重试 ≥3 次；高相关时打印冲突源表达式。
-
-### 2026-10-29 — 按最新官方文档对齐 API 层（顾问权限）
-
-依据：`GET /tutorial-pages/brain-api`（lastModified **2026-09-21**）、`consultant-submission-tests` / `understanding-simulation-limits` / `multi-alpha-simulation` / `consultant-features`（均 2026-09-18），并用顾问账号在真实 API 上逐项验证。
-
-**验证到的事实（改动旧认知的部分）**
-
-1. **顾问阈值远高于旧文档**：真实 check 的 `limit` 为 `LOW_SHARPE=1.58`、`LOW_FITNESS=1.0`、`HIGH_TURNOVER=0.7`、`LOW_SUB_UNIVERSE_SHARPE=1.05`（USA TOP3000 D1）。旧 SKILL 里写的 1.25 / 1.1 是普通账号标准。
-2. **新增两类 check**：`IS_LADDER_SHARPE`（带 `year`/`startDate`/`endDate`）与 `LOW_2Y_SHARPE`（近 2 年 Sharpe，limit 同为 1.58）；弱信号会直接卡在 `LOW_2Y_SHARPE`。另有 `OLD_SIMULATION`（FAIL 表示需重模拟）、`DATA_DIVERSITY`、`PROD_CORRELATION`、`REGULAR_SUBMISSION`、`CLUSTER_TEST`（`ERROR` 也不阻断）。
-3. **仿真进行中的 GET 不返回 `status`**：只有 `progress`。把"无 status"当异常会误判超时；正确做法是以 `Retry-After` 是否归零判断终态。
-4. **多仿真确实可用**：`POST /simulations` 传 2 元素数组 → 父 sim 返回 `children` → 子 sim 各自带 `alpha`。实测 2 路 QUICK 模式约 95 秒完成。额度**按子仿真逐个计数**（4998→4994），多仿真只省时间不省额度。
-5. **额度响应头**：`X-Ratelimit-Limit=5000` / `Remaining` / `Reset`（顾问账号实测）。
-6. **列表可服务端过滤**：`GET /users/self/alphas?status=ACTIVE` 直接返回 22 条，不必拉全量 564 条再本地筛。
-7. `OPTIONS /simulations` 的 settings 比正文文档多出 `maxTrade` / `maxPosition` / `testPeriod` / `lookback` / `simulationMode` / `selectionHandling` / `selectionLimit`；`type` 实为 `REGULAR` / `REGION_AGNOSTIC`（不是文档写的 `SUPER`）。
-
-**代码改动**
-
-- 新增 `scripts/wq_api.py`：统一认证/权限、`Retry-After` 轮询、终态机、多仿真、额度跟踪、`status=` 过滤、记录集解析、日期对齐相关、`SimulationCache` 去重、顾问阈值 `gate_report`、`submit_verified`。
-- 新增 `scripts/simulate_batch.py`：批量回测 + 去重 + 可选提交（替代各 `wq_*_opt*.py` 里复制的样板）。
-- 重写 `evolve_skill.py` / `wq_bulltrap_{opt,opt2,opt3,submit,record}.py` / `wq_fcf_{opt,corr,submit}.py` / `wq_ltinv_opt.py`，删掉各自的 `simulate()` 与固定 `sleep(8)`。
-
-**仍有风险**
-
-- `CLUSTER_TEST` 目前返回 `ERROR`（平台侧无数据），不影响提交但也不提供信息。
-- 日收益相关仍是 proxy；`SELF_CORRELATION` 用信号级相关，护栏 2（信号成分重叠）不可省。
-
-### 2026-10-29 — 内置模板 A–F 首次全量实测（顾问账号 USA TOP3000 D1）
-
-依据：用 `scripts/wq_api.py` 对 §4.1.2 的六个内置模板各跑 1 次真实仿真，共消耗日额度 6 次（5000 的 0.12%）。完整数据见 §4.1.2 下的「实测基线」表。
-
-1. **「通过率最高」是失真表述，已修正**：模板 A 实测 Sharpe 1.23 / Fitness 0.58，离顾问门槛 1.58 / 1.0 很远。该注脚的真实含义是「最不容易报错、最容易跑出结果」，与「能过门槛」是两个口径。凡把模板 A 当作高质量样本复用的场合（如 few-shot 示例、默认起点），都会把生成质量锚定在 1.2 量级。
-2. **单腿全灭、双腿全过**：A/B/C/F（单信号）4 条全部未过；D/E（两条正交腿相加）2 条全过且分数最高（1.64 / 1.81）。样本仅 6 条不足以称规律，但机制成立——正交腿相加降波动、抬信息比。**在顾问门槛下，双腿混合应作为默认姿势。**
-3. **B 差 0.01**（1.57 vs 1.58，Fitness 1.10 已过线），且 TO 11.2% 距上限 70% 有大量余量。这类「贴线」实例的正确处置是**参数邻域搜索**（decay / neutralization / window / truncation），不是换结构。新造模板首跑达标率实测 2/6，邻域搜索的先验成功率显著更高，成本还更低。
-4. **未提交 alpha 上 `SELF_CORRELATION` 恒为 `PENDING`**，平台不计算。因此「模板是否值得进 few-shot」在物理上不可能依赖相关性——相关性只在提交动作后才被评估，且它是 **alpha 级**属性而非**模板级**（同一骨架换字段即可绕过）。判定「模板质量」时应显式排除 `SELF_CORRELATION` / `PROD_CORRELATION`。
-5. **IS checks 的实际返回集合比 `BLOCKING_CHECKS` 白名单更大**：实测出现 `CLUSTER_TEST`、`OSMOSIS_ALLOCATION`、`MATCHES_THEMES`、`MATCHES_PYRAMID`，均不在旧白名单内。用白名单做「是否达标」判定的实现会静默放行这些项的 FAIL。**正确做法：除相关性两项外，任何 `FAIL`/`ERROR` 都阻断；`WARNING` 不阻断但必须记录**（A 的 `CLUSTER_TEST` 实测为 WARNING，value 1.45 / limit 1.58）。
-6. **`CLUSTER_TEST` 在未提交 alpha 上也会给出数值**（本次 A 为 1.45，limit 1.58）。它是「与同簇 alpha 的相似度」的早期信号，可作为提交前低相关的辅助判据，但目前未纳入任何门禁。
-
-### 2026-10-30 — 历史库反查：哪个模板最容易产出可提交 alpha（127 条样本统计，零仿真消耗）
-
-依据：直接对本地 `alpha_db.json`（127 条：14 ACTIVE / 112 UNSUBMITTED / 1 REJECTED）按「顾问 D1 门槛（Sharpe ≥1.58、Fitness ≥1.0、1%≤TO≤70%）」重算，不动用任何仿真额度。完整表格见 §4.1.3。
-
-1. **命中率最高的簇是期权 IV，不是基本面**：期权 IV（skew / pcr_oi）16 次尝试 10 次过线（62.5%）；OI 质量 19 次 8 次（42.1%）；现金流/EV 15 次 4 次（26.7%）；一次性探索的其他 81 次仅 2 次（2.5%）。SKILL 此前把「基本面最稳」当第一起点，是**单腿口径下的结论**，在双腿口径下不成立。
-2. **腿数是比数据类型更强的分层变量**：双腿 24 次 / 8 ACTIVE（33.3%），单腿 103 次 / 6 ACTIVE（5.8%），相差 5.7 倍。A–F 首跑「双腿全过、单腿全灭」与历史库独立印证同一机制。
-3. **据此新增模板 G（期权 IV skew × 基本面质量）**，写入 §4.1.2。它是库内唯一「多个 50/50 变体全部过线」的骨架：+OI/equity → 2.37/1.89/7.7%（ACTIVE）；+FCF/equity → 2.01/1.57/9.4%（ACTIVE）；+OI/equity 换 decay → 2.37/1.88/9.3%（未提交）。
-4. **发现重复仿真**：`2rpzeGab` 与 `ZYE31mzx` 表达式完全相同（仅 decay 10 vs 15），属纯额度浪费——`SimulationCache` 的 hash 去重应在所有批量脚本里强制启用。
-5. **9 条「已过线但未提交」存货**（QPGkoVeX 2.16/1.77、pwNrKp3j 2.28/1.62、2rpzeGab 2.37/1.88、1YzMkAdM 1.96/1.37、O0GPG0RR 1.81/1.10、78zb2WGx 1.74/1.32、WjV5Mn5N 1.79/1.45、v27aYRz 1.72/1.04、d5ZVZg5w 1.61/1.19）。**产新 alpha 之前应先把这批提交掉**，零仿真成本；提交前跑 §7.2 护栏 2（信号成分重叠），其中多条共享同一 IV 腿，大概率互撞，按 Sharpe 从高到低只提交首个、同簇其余放弃。
-6. **口径提醒**：本节「过门槛」不含 `SELF_CORRELATION` / `PROD_CORRELATION`——这两项只在提交动作后才被平台计算，未提交 alpha 恒为 `PENDING`，因此历史库统计无法预知，只能靠护栏 2 提前拦。
-
-### 2026-10-30 — 存货重跑反证：9 条已过线存货全部掉线（消耗 9 次仿真）
-
-紧接上一条统计，把筛出的 9 条「已过顾问门槛但仍 UNSUBMITTED」的存货按原表达式、原 settings 全部重跑（单批多仿真 9 个，耗时 1m41s，额度 4991→4982）。
-
-| 原 id | 新 id | 旧 S / F | 新 S / F | ΔSharpe | 结论 |
-|---|---|---:|---:|---:|---|
-| 2rpzeGab | E560aaxm | 2.37 / 1.88 | 1.63 / 1.00 | −0.74 | 唯一指标过线，卡 `LOW_SUB_UNIVERSE_SHARPE` 0.70 vs 0.71 |
-| pwNrKp3j | gJeqPP0J | 2.28 / 1.62 | 2.01 / 1.22 | −0.27 | `CONCENTRATED_WEIGHT` 0.154>0.1 + Sub-Universe FAIL |
-| QPGkoVeX | MPYl8829 | 2.16 / 1.77 | 1.55 / 1.02 | −0.61 | `LOW_SHARPE` + Sub-Universe FAIL |
-| 1YzMkAdM | npvkzzX3 | 1.96 / 1.37 | 1.59 / 0.90 | −0.37 | `LOW_FITNESS`（WARNING 级）0.90 < 1.0 |
-| O0GPG0RR | RREZaavz | 1.81 / 1.10 | 1.56 / 0.82 | −0.25 | Sharpe/Fitness/集中度/Sub-Universe 全 FAIL |
-| WjV5Mn5N | KPJY88pl | 1.79 / 1.45 | 1.36 / 0.85 | −0.43 | 双指标 FAIL |
-| 78zb2WGx | leA6zzY2 | 1.74 / 1.32 | 1.26 / 0.76 | −0.48 | 双指标 + Sub-Universe FAIL |
-| v27aYRz | bl62PPgq | 1.72 / 1.04 | 1.44 / 0.74 | −0.28 | 双指标 FAIL |
-| d5ZVZg5w | E560aaMm | 1.61 / 1.19 | 1.26 / 0.79 | −0.35 | 双指标 + `LOW_2Y_SHARPE` 1.57 vs 1.58 |
-
-1. **「存货」是伪资产**：历史库里 Sharpe/Fitness 只在**仿真当时**成立。9 条重跑平均 −0.42 Sharpe、无一存活，说明平台在这 3 个月里延长了 IS 窗口 / 加入了新数据，而这些都是 2026-08 前的旧信号。
-2. **`OLD_SIMULATION` 是掉线预警而非手续问题**：它不只是「需要重跑一下」，而是强预测「重跑就掉」。现在把它写进 §5.2。
-3. **相关性豁免测算全部不成立**：即便把指标修好，9 条的最强冲突 ACTIVE 分别为 Gre2WN65（2.75）、ZYE31mzx（2.37）、9q7nYrZe（2.02）、gJ8kN8kl（1.68），豁免要求新 Sharpe ≥ 冲突 × 1.1，最高的 E560aaxm（1.63）需 ≥ 3.03，全部不可能满足。
-4. **ROE 腿是池内最脏的组件**：护栏 2 对 `group_rank(ts_rank(operating_income/equity,126),subindustry)` 命中 12 个 ACTIVE，最强者 Sharpe 2.75。含这条腿的新 alpha 除非自身 Sharpe 能到 3.0+，否则一律别提交。
-5. **`IS_LADDER_SHARPE` 的 PASS 阈值确认会打折**：E560aaxm TO=9.1% < 30%，其 limit 实测 2.02 而非 2.22（≈2.38×0.85），与 §5.2.1 一致；`CLUSTER_TEST` 在其上给出 0.63（WARNING），可作为同簇相似度的早期读数。
-6. **结论修正**：不要再把「历史过线存货」当作低成本提交来源。真正低成本的路径是——用命中率最高的**骨架**（仍是双腿混合，模板 G 的结构）**换新腿/新字段重新构造**，而不是复用旧表达式。
-
-### 2026-10-30 — 门槛核对：数值未提高，但发现 Power Pool 低门槛通道
-
-用户提出「已是正式顾问，门槛可能被提高」，用实时数据核了一遍。**结论：常规门槛一个数字都没变，真正的新东西是 Power Pool。**
-
-**验证方法**：`GET /alphas/{id}` 的 `is.checks[].limit` 是权威值（不是文档、不是 SKILL 记忆）。取自当天重跑的三个 USA TOP3000 D1 alpha：
-
-| 检查项 | 实测 limit | SKILL 旧值 | 是否变化 |
-|---|---:|---:|:---:|
-| LOW_SHARPE | 1.58 | 1.58 | 未变 |
-| LOW_FITNESS | 1.0 | 1.0 | 未变 |
-| LOW_TURNOVER / HIGH_TURNOVER | 0.01 / 0.70 | 同 | 未变 |
-| CONCENTRATED_WEIGHT | 0.1 | 0.1 | 未变 |
-| CLUSTER_TEST | 1.58 | 1.58 | 未变 |
-| LOW_2Y_SHARPE | 1.58 | 1.58 | 未变 |
-| IS_LADDER_SHARPE | 2.02（TO 9.1% → 2.38×0.85）/ 1.58 | 与 §5.2.1 一致 | 未变 |
-
-附带确认：`LOW_SUB_UNIVERSE_SHARPE` 的 limit 确实是 `0.75·√(1000/3000)·Sharpe = 0.433·Sharpe`（E560aaxm：0.433×1.63=0.71，实测 limit 0.71 ✓），即**抬高 Sharpe 会同步抬高它的门槛**，不能靠提 Sharpe 硬冲。
-
-**新增（文档来源 `alpha-submission`，2026-09-18）**：Power Pool Alphas 通道，Sharpe 只要 **≥ 1.0**，代价是 ≤8 算子、≤3 唯一字段、Power Pool Correlation < 0.5。已写入 §5.1.2 与 §5.2。
-
-**实测行为**：`POWER_POOL_CORRELATION` 在 22 个 ACTIVE 中的 9 个上出现，但**全部 `PENDING`**，`is.powerPoolCorrelation` 为 `None`。所以它现在不能当判据，只能按 4 条硬约束自己预筛。
-
-**对「门槛提高」这个问题的直接回答**：数值没提高，但**有效门槛确实在上升**，机制是两个——① 信号随时间衰减（9 条存货平均 −0.42 Sharpe）；② 自己的 ACTIVE 池越厚，SELF_CORRELATION 越难过（豁免要求新 Sharpe ≥ 冲突 × 1.1，池里最强已到 2.75，等于要求新 alpha 做到 3.03）。**这是"池子变挤"，不是"分数线变高"。**
-
-
-### 2026-10-30 — IV skew × ROE（模板 G）优化：Fitness 解法与「换字段」的边界
-
-用户给 `0.5*rank(ts_mean((iv_call_180-iv_put_180)/iv_mean_180,5)) + 0.5*group_rank(ts_rank(operating_income/equity,126),subindustry)`，反馈 Fitness 略低（实测 `LLMbXVjn` S=1.59 / F=0.95 / TO=8.0%，`LOW_FITNESS` FAIL；`E560aaxm` S=1.63 / F=1.00 卡 `LOW_SUB_UNIVERSE_SHARPE` 0.70 vs 0.71）。两轮共 20 次仿真（额度 5000→4971）。
-
-**结论一：Fitness 的解药是 INDUSTRY 中性化，不是 decay。** 同一表达式 SUBINDUSTRY(d15) → INDUSTRY(d15)：`F 0.95→1.08`、`Returns 4.47%→5.32%`、TO 几乎不动（8.0%→7.4%），`mLo2xNm9` 全部 IS check PASS。反向验证：decay 15→0 把 TO 抬到 19.7%、Sharpe 抬到 1.77，Fitness 反而掉到 0.89——因为分母从地板 0.125 变成真实 TO 0.197（+58%）而 Returns 只涨 12%。
-
-**结论二：这条表达式无论如何都提交不了。** 护栏 1 显示 `mLo2xNm9` 与已 ACTIVE 的 `ZYE31mzx`（同一表达式）日收益相关 **0.975**，豁免需 Sharpe ≥ 2.37×1.1 = 2.61，实测 1.66 → 必 FAIL。
-
-**结论三：在 IV 簇内换字段是无效工作量。** 20 次仿真里把 IV 腿换成 90/120/270 天 skew、`implied_volatility_mean_skew_270/360`、`pcr_oi_270`，质量腿换成 `cashflow_op/equity`、`operating_income/assets`、`free_cash_flow_reported_value/assets`、`ebitda/enterprise_value`，与池内 IV 类 ACTIVE（`58p0232N`/`ZYE31mzx`/`XgoQMAq1`）的日收益相关全部落在 **0.55–0.94**，无一低于 0.5。附带发现：IV × 现金流质量腿的组合几乎必然触发 `LOW_SUB_UNIVERSE_SHARPE`（0.29–0.51 vs limit 0.73–0.81），换期限 / 换中性化 / 降 truncation 都救不回来。
-
-**结论四：脱簇后的可行解。** 把第二腿换到池内无人使用的 pv1 反转腿：
-
-```fastexpr
-0.4 * rank(-(close / open - 1))
-+ 0.6 * group_rank(ts_rank(cashflow_op / equity, 126), subindustry)
--- decay=10, neutralization=INDUSTRY, truncation=0.08, nanHandling=ON
-```
-
-`E560gqE1` → **Sharpe 2.10 / Fitness 1.43 / TO 11.7% / Returns 5.81% / DD 2.7%**，全部 IS check PASS；护栏 2 无信号成分重叠；护栏 1 最大相关 **0.509**（vs `YPvlEl0l` S=1.63，豁免门槛 1.79，2.10 已满足），其余 0.401 / 0.373。次优 `bl62oNLK`（0.4×IV120 + 0.6×反转，S=1.71 / F=1.15 / TO 23.6%）与 `58p0232N` 相关 0.684，豁免门槛恰好 1.71——贴线，不建议。
-
-**方法论沉淀**：本轮把「优化」拆成两个独立问题分别验证——① 指标能不能过（参数邻域搜索，3 次仿真定位 INDUSTRY）；② 相关能不能过（护栏 1+2，7 次仿真证明 IV 簇已饱和）。**先用少量仿真确认「指标解」存在，再用护栏判断这个骨架值不值得继续投入，比直接扑在字段排列组合上省得多。**
-
-### 2026-10-30 — 提交 E560gqE1 失败：PROD_CORRELATION 0.8045 硬否决，以及「403 响应体才是判定书」
-
-按上一轮结论提交 `E560gqE1`（0.4×pv1 反转 + 0.6×cashflow_op/equity，S=2.10 / F=1.43 / TO 11.7%）。**结果：未提交成功，被 `PROD_CORRELATION` 一票否决。**
-
-**过程**：复核全绿（本地 gate PASS，13 项 IS check 全 PASS，`CLUSTER_TEST` 仅 WARNING），`POST /submit` 返回 **201**，但轮询 2 分钟 `dateSubmitted` 始终 `None`、status 卡 `UNSUBMITTED` —— 典型的「201 吞提交」。**再 POST 一次拿到 403，响应体给出了真实判定**：
-
-```
-PROD_CORRELATION  FAIL    value=0.8045 limit=0.7
-SELF_CORRELATION  PASS    value=0.6226 limit=0.7
-REGULAR_SUBMISSION PASS   value=0      limit=4      ← 配额根本没用完
-```
-
-**三条结论**
-
-1. **指标全 PASS 与「能提交」是两件事。** `E560gqE1` 的每一项本地与平台 IS 指标都过线，`CLUSTER_TEST` 只是 WARNING，照样被生产池相关一票否决。此后评估候选的口径必须改成「指标 + 相关性」双轨，且相关性以提交时的 403 body 为准。
-
-2. **本地护栏只能排除、不能放行。** 护栏用自己的 ACTIVE 池算日收益相关，近似 `SELF_CORRELATION`；它给出 0.509，实际 0.6226（低估 0.11），而真正致命的 `PROD_CORRELATION` 护栏**完全覆盖不到**。护栏 ≥ 0.45 就应按高危处理。
-
-3. **`is.prodCorrelation` 是僵尸字段。** 22 条 ACTIVE 上全部为 `0.0`，平台不回算（`POWER_POOL_CORRELATION` 同样恒 `PENDING`）。因此「按信号族统计生产池拥挤度、挑不拥挤的族去造」这条路**做不出来**，已放弃并删除了相应脚本，不要再试。
-
-**对 `E560gqE1` 的判读**：0.4×反转 + 0.6×现金流质量 这个组合与生产池相关 0.80，说明两条腿各自都是极其拥挤的常见信号，`SELF_CORRELATION` 0.62 也印证了这一点。靠调权重/decay/中性化降不到 0.7 以下——这与 IV 簇那 7 次仿真的结论一致：**同一信号族内换参数/换期限不改变相关性量级**。要过，只能换数据源（ Analyst / Sentiment / 供应链 / 另类数据这类池内无人使用的）。
-
-**代码改动**：`wq_api.submit_verified` 在判定为「201 吞提交」后会自动再 POST 一次，并用新增的 `submit_verdict(resp)` 解析 403 body → 返回 `submit_blocked(PROD_CORRELATION=0.8045(limit=0.7))`；仅当 body 里没有任何 FAIL 项时才报 `submit_403_quota_exhausted`。新增 `scripts/submit_one.py`：先复核（status / gate / 全量 checks / 相关性）再决定是否提交，`--do-submit` 才真正动手，避免误提交与重复提交。
-
-### 2026-10-30 — 换数据源两轮 20 次仿真：0/20，以及「冷门字段」假说的破产
-
-`E560gqE1` 被 `PROD_CORRELATION 0.8045` 否决后的应对是「换数据源」。两轮各 10 次仿真（额度 4961→4941），**全部失败，最高 Sharpe 1.16**。
-
-**第三轮（只按「我方零使用」选源）** — 选出 model51（系统性风险）、pv13（竞品/供应链关系）、news18（Ravenpack）、socialmedia8。结果：Sharpe **0.10–0.52**，含 model51 腿的普遍带 **46%–64% 回撤**并 `CONCENTRATED_WEIGHT FAIL`。
-
-**第四轮（修正为「全局热门 ∩ 我方零使用」）** — 选出 `anl4_dts_rspe`（分析师分歧）、`anl4_netprofit_number`（覆盖度）、`capex/sales`、`adv20`、`sharesout`、`(high-low)/close`。结果：Sharpe **−0.33–1.16**，最好的是 `R4-3 0.5disp+0.5capex`（S=1.16 / F=0.62 / TO=4.9% / DD=3.9%）。
-
-**三条结论**
-
-1. **冷门是有原因的。** 只按「我方零使用」选，会选中全局也冷门的字段（model51 最高 userCount 4140、pv13 2818、socialmedia8 2783、news18 1238），它们本来就弱。改成「全局 userCount≥1500 ∩ 我方零使用」后，最好成绩从 0.52 提升到 1.16——方向对了，但**仍差 0.42 才够 1.58**，而参数邻域搜索历史上只能带来 ~0.07–0.10 的 Sharpe 提升。
-
-2. **pv1 微观结构腿在这批里全灭。** `rank(-adv20)`、`rank(-ts_delta(sharesout,250))`、`rank(-ts_mean((high-low)/close,20))` 单独配对的 Sharpe 是 0.11 / 0.80 / 0.11，回撤最高 81%。真正撑住的是**两条慢速基本面/分析师腿**的组合（disp + capex，DD 3.9%）。
-
-3. **`anl4_*_flag` / `anl4_*_ft` 是分类标记，不是数值预测值**（description 为 "forecast type (revision/new/...)"），不能做 `ts_rank`。同族只有 `*_number`（覆盖数量）、`anl4_dts_rspe`（估计标准差）、`anl4_ebit_value`（公告实际值）是数值字段——选字段前必须读 description，否则白烧仿真。
-
-**由此产生的策略修正（重要）**：既然 `PROD_CORRELATION` 既不可预测也难以靠换源规避，另一条路是**走豁免**——相关性 ≥0.7 时，若新 alpha 的 Sharpe ≥ 冲突 alpha × 1.1 仍可过。我方池内最强 ACTIVE 已达 2.75，说明高 Sharpe 的拥挤信号确实能过关。`E560gqE1` 是败在「Sharpe 2.10 不够高」而不是「信号太像」。下一步应回到**能出高 Sharpe 的成熟信号族**（pv1 / fundamental6 / analyst4 / option8），把目标定在 2.5+ 去撞豁免线，而不是继续在低 Sharpe 的空白区里找。
-
-**工具**：`scripts/datasource_scan.py`（零仿真成本）新增「甜点区」=`userCount≥1500 ∩ 我方零使用`；`--min-cov` 控覆盖度、`--min-user` 控热度、`--show <kw>` 按 dataset 关键字查字段并打印 description。
-
-### 2026-10-31 — 豁免路径实跑：本账户已饱和，IS 与相关性互斥
-
-用户要求「按豁免路径起一轮」：克隆 proven 高 Sharpe 结构（Gre2WN65 估值+质量 S=2.75、bldLbe6R 4 腿 S=2.22），换掉饱和腿 + 扫 neut/decay，目标撞 1.1× 豁免线。新增 `scripts/opt_exempt.py`（10 候选，batch_size=1 防连坐），跑两轮共 ~10 次有效仿真。
-
-**结果（IS 检查 + 日收益 proxy 相关）：**
-
-| 候选 | S | F | TO | IS | 最大 proxy 相关 | 结论 |
-|---|---:|---:|---:|:--:|---|---|
-| A1 EV/cf+FCF/eq IND d0 | 1.47 | 0.79 | 15.0% | ✗ | 0.651 (Gre2WN65 2.75) | 换腿掉线 |
-| A2 EV/cf+FCF/eq SEC d4 | 1.06 | 0.59 | 7.6% | ✗ | — | 换腿掉线 |
-| A3 EV/cf+FCF/liab IND d0 | 1.40 | 0.75 | 14.8% | ✗ | 0.635 | 换腿掉线 |
-| **B1 4leg IND d0** | **2.12** | 1.29 | 26.6% | ✅ | **0.973** (bldLbe6R 2.22) | 需≥2.44 |
-| B2 4leg EV/cf SEC d4 | 1.55 | 1.17 | 13.7% | ✗ | 0.919 | 掉线+相关 |
-| B3 3leg SEC d4 | 1.24 | 0.85 | 9.2% | ✗ | 0.732 | 掉线+相关 |
-| **C1 eps/close+FCF/liab IND d0** | **2.01** | 1.32 | 17.7% | ✅ | **0.810/0.798/0.750** | 需≥2.44/2.22/2.48 |
-| C2 ROE/close+analyst SEC d4 | 0.90 | 0.54 | 5.8% | ✗ | 0.837 | 掉线+相关 |
-| C3 (cf-capex)/close+FCF/eq SUBIND | 1.48 | 0.83 | 15.8% | ✗ | 0.807 | 掉线+相关 |
-| C4 4leg fresh SEC d4 | 1.56 | 1.16 | 14.6% | ✗ | 0.848 | 掉线+相关 |
-
-**三条铁律：**
-
-1. **OI/equity 腿不可替换**。A 组把质量腿换成 FCF/equity / FCF/liab，Sharpe 直接塌到 1.06–1.47——`operating_income/equity` 才是 Sharpe 引擎，不是可替换组件。
-2. **est_eps/close 家族能出清洁 IS passer（B1=2.12 / C1=2.01 全过），但它是 bldLbe6R 的克隆**——B1 与 bldLbe6R 日收益相关 **0.973**（仅 decay 0 vs 4）、C1 与三个 est_eps/close 家族 alpha 相关 0.75–0.81。豁免需 Sharpe ≥ 冲突 × 1.1 = 2.22×1.1 = **2.44**，两条都差 0.3+。
-3. **IS 过线与相关性过线在本账户互斥**。达到 S≥1.58 的两条（B1/C1）必然 ≥0.7 相关；相关性 <0.7 的（A1/A3，proxy 0.63–0.65）必然 S<1.58。中间没有「既过 IS 又 <0.7」的甜点区。叠加 proxy 低估 selfCorrelation ~0.11（E560gqE1 实证：proxy 0.509 vs 实测 SELF 0.623）真实相关更高，甜点区更窄。
-
-**根因**：本账户 22 条 ACTIVE 已覆盖两大引擎（OI/equity 9 条、est_eps/close 4 条）及其卫星腿（FCF/liab、ROE/close、动量、-liab/assets、IV skew）。任何基于这些引擎的新 alpha 都 ≥0.7 相关，且无法超越被克隆的冠军（2.22–2.75）的 1.1 倍。换空白数据源（第 3/4 轮）最高只到 1.16，连 IS 都过不了。**结论：本账户在已知家族内已饱和，增量提交期望收益≈0。**
-
-**可行出路（未验证，留给下一轮）：**
-- 唯一的数学可能是在 OI/equity/est_eps/close 之外找到**第三个高 Sharpe 引擎**且该引擎在本池无人使用——第 3/4 轮未找到（最高 1.16），需要更系统的因子挖掘而非字段排列。
-- 或接受饱和现实，停止在本账户增量提交，转去**挖掘全新数据源的慢信号**（analyst 全文、供应链、另类数据），这类在第 4 轮甜点区里 `anl4_*` 数值字段（分歧/覆盖度）相关最低（0.5 档），是相对不拥挤的方向，但需要更长回看窗口和更精细的构造。
-
-**工具更新**：`scripts/guard_new.py` 增加 `--glob`（默认 `opt_exempt_results.json`）与 `--only` 过滤，可对任意一轮候选跑双层护栏；`scripts/opt_exempt.py` 在 `run_many` 后加了空 alpha_id 重试兜底（偶发 API 返回空 id）。`scripts/exempt_scan.py` 把 22 条 ACTIVE 按 Sharpe 排序、输出结构特征到 `.workbuddy/active_structures.json`，是豁免路径的零成本起点。
-
-### 2026-10-31 — Power Pool 形状的结构性洞察：(A−B)/mean(A,B) 是 ≤3 字段下的唯一高 Sharpe 结构
-
-用户候选 `rank(ts_decay_linear((implied_volatility_call_180 - implied_volatility_put_180) / implied_volatility_mean_180, 5))`，问能否做成 PP alpha。**零仿真消耗判定，结论：形状够格、内容已死。**
-
-**四道 PP 闸门的实际读数**：
-
-| 闸门 | 阈值 | 候选实测 | 判定 |
-|---|---|---|:--:|
-| 算子数 | ≤ 8 | 4 | ✓ |
-| 唯一字段 | ≤ 3 | 3 | ✓ |
-| Sharpe | ≥ 1.0 | 同族 1.55（`58p0232N`） | ✓ |
-| PP 相关 | < 0.5 | 撞 `58p0232N`，信号级相关 ≈1.0 | ✗ |
-
-**致命点**：池内已有 ACTIVE `58p0232N` = `rank(ts_mean(同一 IV skew, 5))`（S=1.55 / F=1.18 / TO=11.5% / INDUSTRY / decay 10）。候选与它**同字段、同窗口、同 rank 外壳，只差 `ts_mean`→`ts_decay_linear`**。PP 相关门槛 0.5 比 SELF 的 0.7 更严，同一信号换平滑算子必挂。历史佐证：`JjGEGvJA` 即 `rank(ts_decay_linear(skew, 10))`（S=1.56 / F=1.00 / TO=16.1%），早已跑过、从未提交成功。
-
-**核心洞察（可复用）**：IV skew 单腿就能到 Sharpe 1.55，**不是因为 IV 字段，而是因为 `(A − B) / mean(A,B)` 这个「两个同源反向分子 + 一个同源分母」的 3 字段形状**。分母取两分子均值使该指标天然有界，带来低换手、低回撤和稳定排序——这是在 ≤3 字段约束下唯一能同时满足「Sharpe ≥1.0」和「形状合规」的结构。推论：
-
-- **优化 PP 候选应保留这个差分形状、换数据族**，而不是换期限/换窗口（后者已被 §12 的 7 次仿真证伪：同族换期限相关仍在 0.70–0.94）。
-- 判定一个 PP 候选有没有希望，先问「它的 3 个字段是否构成一个正向分量对 + 一个归一化分母」；若是单比率（`a/b`）或单字段 rank，Sharpe 几乎必然落在 0.6–0.9（§5.1.2 首批实测 9 条非 model51 候选 0.09–0.92）。
-
-**同构替代候选（零成本从本地字段快照挖出，未仿真）**：
-
-| 族 | 正向分量对 | 覆盖度 | 我方使用 | 备注 |
-|---|---|---|---|---|
-| news12 | `news_high_exc_stddev` / `news_low_exc_stddev` | 0.965 / 0.971 | 零 | 新闻窗口内「高点→最新价」「最新价→低点」标准化变动；本质是价格量，需警惕与 pv1 振幅/反转隐藏相关 |
-| analyst4 | `highest_sales_estimate` / `lowest_sales_estimate` | 1.0 / 1.0 | 零 | 语义是预测区间宽度（分歧），不是方向，需重新设计符号 |
-| analyst4 | `anl4_buy` / `anl4_hold` | 0.624 | 零 | 均为 VECTOR，需 `vec_avg`，按旧经验不可直接进标量算子 |
-
-**字段语义陷阱补充**：`implied_volatility_mean_180` 的 description 明确是 "The average of IvCall180 and IvPut180"——分母与分子同源，这正是该指标能稳定的原因。构造同构指标时应显式复刻这一点（用 `(A+B)/2` 作分母），不要换成 `close` / `cap` 之类异源分母。
+- `SKILL.md`：最终人类可读 playbook；第 12 节只留决策级结论索引，完整实验记录在 `references/empirical-log.md`。
+
+## 12. 实证记录（已迁至 references/empirical-log.md）
+
+完整记录（含原始指标表与推理链）见 `references/empirical-log.md`。
+这里只留**决策级结论**——做判断时看这一页就够，要追溯证据再翻文件。
+
+| 日期 | 实验 | 一句话结论 |
+|---|---|---|
+| 2026-08-13 | cap 回归中性化模板挖掘（YPvlEl0l 提交 ACTIVE） | `bucket(cap)` 回归中性化可产出 ACTIVE；模板能复用，但字段要换族 |
+| 2026-08-13 | bucket(cap) × 期权 breakeven × OI 模板挖掘（GrGmXvwx 提交 ACTIVE） | 期权 breakeven × OI 组合可提交；单腿期权数据命中率极低 |
+| 2026-08-16 | mdl77_2gdna_actrtn12m × ROE × 资产负债率（VkGQxanA / QPGRvdV5 提交 ACTIVE） | 双基本面腿（ROE × 资产负债率）稳，但同族复用会撞 SELF_CORRELATION |
+| 2026-10-29 | 按最新官方文档对齐 API 层（顾问权限） | `OPTIONS /simulations` 才是 settings 权威来源；文档正文会过期 |
+| 2026-10-29 | 内置模板 A–F 首次全量实测（顾问账号 USA TOP3000 D1） | 模板本身不保证过线；数据集一致性优先于模板美观 |
+| 2026-10-30 | 历史库反查：哪个模板最容易产出可提交 alpha（127 条样本统计，零仿真消耗） | **腿数**才是分层维度，不是数据类型；单腿命中率 5.8%、双腿 33% |
+| 2026-10-30 | 存货重跑反证：9 条已过线存货全部掉线（消耗 9 次仿真） | `OLD_SIMULATION=FAIL` 的存货重跑 9/9 全灭（平均 −0.42 Sharpe），存货只能当骨架 |
+| 2026-10-30 | 门槛核对：数值未提高，但发现 Power Pool 低门槛通道 | 数值门槛没变；发现 Power Pool 低门槛通道（Sharpe ≥ 1.0） |
+| 2026-10-30 | IV skew × ROE（模板 G）优化：Fitness 解法与「换字段」的边界 | Fitness 贴线时先换 neutralization，别先动 decay |
+| 2026-10-30 | 提交 E560gqE1 失败：PROD_CORRELATION 0.8045 硬否决，以及「403 响应体才是判定书」 | **403 响应体才是判定书**；本地护栏对 prod corr 无预测力 |
+| 2026-10-30 | 换数据源两轮 20 次仿真：0/20，以及「冷门字段」假说的破产 | 20 次仿真 0 命中；「冷门字段 = 好机会」是伪命题 |
+| 2026-10-31 | 豁免路径实跑：本账户已饱和，IS 与相关性互斥 | 本账户在已知数据族已饱和：IS 与相关性互斥，无法同时满足 |
+| 2026-10-31 | Power Pool 形状的结构性洞察：(A−B)/mean(A,B) 是 ≤3 字段下的唯一高 Sharpe 结构 | `(A−B)/mean(A,B)` 是 ≤3 字段下唯一高 Sharpe 结构 |
+| 2026-11-03 | 社区 ARC/GLB 模板复现：GLB 结构性不可达，EUR 打通后被 PROD_CORRELATION 否决（7 批 47 次仿真） | GLB 的 EMEA 门槛不可达（13 次最高 0.77）；EUR 靠"平滑对冲腿 + 收窄窗口"打通，但 ladder 0.88 与 prod corr 0.8314 双双 FAIL |
+| 2026-11-04 | GBR/TOP700 价格反转族改造：`ts_rank` 窗口 22→126 是决定性杠杆，加 52 周高/均线相对腿（alphaCount 9–50）后 S 0.82→1.78 | 窗口长度比 decay 重要得多；**GBR 大盘是反 52 周高点**（该腿须反号）；QUICK 的 Sharpe 在 GBR 系统性高估 0.45，定稿必须 FULL |
+| 2026-11-04 | `PROD_CORRELATION 0.7621` 被拒后换族混腿：三族 20 条单腿实测 + 权重 sweep，最终 65% 价格族 + 35% `pattern_scores` → **`ZYQbbVnj` ACTIVE**（S 1.78 / F 1.51 / ladder 2.07） | **prod corr 是族级判定，唯一旋钮是正交族权重（每 5% ≈ −0.03）**；65% 是 `PROD_CORRELATION ≤ 0.70` 与 `IS_LADDER ≥ 1.58` 的唯一交集；正交腿 `ts_rank` 窗口越长 corr 越低且 Sharpe 不降 |
