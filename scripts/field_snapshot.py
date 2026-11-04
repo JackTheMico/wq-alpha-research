@@ -92,6 +92,7 @@ def _fetch_fields_from_api(brain, region: str, universe: str, delay: int) -> lis
     fields: list[dict] = []
     offset = 0
     page_size = 50
+    total: Optional[int] = None
     while True:
         resp = brain.request(
             "GET",
@@ -107,8 +108,13 @@ def _fetch_fields_from_api(brain, region: str, universe: str, delay: int) -> lis
             timeout=30,
         )
         if resp.status_code != 200:
+            # 平台对越界 offset 返回 400 "Invalid offset"，翻到尾页时视为正常结束
+            if total is not None and offset >= total:
+                break
             raise RuntimeError(f"拉取字段失败：{resp.status_code} {resp.text[:200]}")
         data = resp.json()
+        if total is None:
+            total = data.get("count")
         batch = data.get("results") or data.get("data") or []
         if not batch:
             break
@@ -116,6 +122,9 @@ def _fetch_fields_from_api(brain, region: str, universe: str, delay: int) -> lis
         if len(batch) < page_size:
             break
         offset += page_size
+        # count 上限为 10000，到尾后越界请求会 400，提前收工
+        if total is not None and offset >= total:
+            break
     return fields
 
 

@@ -8,6 +8,15 @@
       "path": "fields_usa_top3000_delay1.json",
       "field_count": 4367,
       "updated_at": "2026-11-01T06:08:28+00:00"
+    },
+    {
+      "key": "gbr_top700_delay1",
+      "region": "gbr",
+      "universe": "top700",
+      "delay": 1,
+      "path": "fields_gbr_top700_delay1.json",
+      "field_count": 10000,
+      "updated_at": "2026-11-04T11:31:07+00:00"
     }
   ]
 }
