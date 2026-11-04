@@ -1,14 +1,45 @@
+# ---- 凭据：永不入库 ----
 credential.txt
+.env
+.env.*
+
+# ---- 本地缓存 / 运行产物：可由脚本重建 ----
 alpha_db.json
-batch_submit_results.json
-simulation_cache.jsonl
 batch_results.json
+batch_submit_results.json
+simulation_cache*.jsonl
 .active_fields_cache.json
+low_alpha_fields.json
+*_results.json
 scripts/_*_results.json
+.pytest_cache/
+.workbuddy/
+
+# ---- Python ----
 *.pyc
 __pycache__/
-.DS_Store
-.env
 .venv/
 venv/
-.workbuddy/
+
+# ---- OS ----
+.DS_Store
+
+# ---- 一次性实验脚本（留在本地，不入库；方法论已沉淀在 SKILL.md / empirical-log.md）----
+scripts/cnhkmcp_alpha_hunt.py
+scripts/final_full_sim.py
+scripts/opt_f1c.py
+scripts/run_f1c_final.py
+scripts/scan_tri_decay.py
+scripts/v4_alpha_hunt.py
+scripts/v4_guard.py
+scripts/v4_round2.py
+scripts/v4_round3.py
+scripts/v4_round4.py
+scripts/v4_submit.py
+scripts/v4_submit2.py
+scripts/v4_submit3.py
+scripts/v4_submit4.py
+scripts/v4_tune.py
+scripts/v5_clean_submit.py
+scripts/v5_tune.py
+scripts/v6_demarket.py
