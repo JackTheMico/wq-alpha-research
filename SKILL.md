@@ -29,6 +29,23 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
 
 ---
 
+## ⚠️ 硬性声明：提交需要显式授权，且每天最多 1 条
+
+**未经用户在本轮对话中明确下达"提交"指令，禁止调用 `POST /alphas/{id}/submit`。**
+"混出候选""跑仿真""看看能不能过线"都不构成提交授权；也**禁止用提交去探测 `PROD_CORRELATION`**（即便 403 不消耗配额）。
+
+**每日提交配额（默认 1 条/天）**：
+
+1. 每个自然日（`Asia/Shanghai`）**最多提交 1 条 alpha**。
+2. **例外**：当**可提交候选池达到两位数（≥ 10 条）**时，解除 1 条/天限制。
+   「可提交」口径 = 同时满足 `brain.gate_report(a, strict=True)` 为 True、`IS_LADDER_SHARPE` / `LOW_2Y_SHARPE` PASS、且与已 ACTIVE alpha 的日收益相关 < 0.7 的 `UNSUBMITTED` alpha。
+3. **计数口径**：提交前先按 `dateSubmitted` 落在当天统计"今日已提交条数"，满额即停，不得跨日预支。
+4. **交互要求**：每次提交前把候选清单（alpha_id / S / F / TO / 自相关）与"今日剩余额度"报给用户确认，提交后回报判定结果。
+
+违反此条 = 越权操作，必须先回滚认知（说明已提交了什么）再继续。
+
+---
+
 ## 1. 快速决策树
 
 ```
@@ -1152,6 +1169,11 @@ GET /alphas/<id>/recordsets/<name>     # 取具体记录集
 
 ### 7.7 提交与二次确认
 
+> ⚠️ **提交前必须先过"显式授权 + 每日 1 条配额"**（见文首硬性声明）。
+> 统一入口：`python scripts/submit_one.py <alpha_id> --do-submit [--pool-size N]`，
+> 脚本内置当日配额校验（`dateSubmitted` 按 `Asia/Shanghai` 自然日计数），满额直接拒绝提交。
+> **禁止**绕过该脚本直接 `POST /alphas/{id}/submit` 去探测相关性。
+
 ```python
 outcome = submit_verified(brain, alpha_id)
 # "ACTIVE" | "SELF_CORRELATION_FAIL(value=...)" | "PROD_CORRELATION_FAIL(...)" | "still_UNSUBMITTED"
@@ -1434,6 +1456,7 @@ GBR/TOP700/delay=1 实测：**10,000 字段 / 138 个 dataset / 6,094 个 MATRIX
 
 ### 8.2 提交优先级
 
+0. **先过配额**：默认每天只能提交 1 条；只有可提交候选池 ≥ 10 条时才允许同一天提交多条（见文首硬性声明与 §7.7）。
 1. 高 Fitness（≥ 1.5）且低 TO（< 15%）
 2. 来自不同信号簇
 3. 若 SELF_CORRELATION 冲突，保留高 Fitness 版本
