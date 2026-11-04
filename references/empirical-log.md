@@ -592,3 +592,73 @@ GBR / TOP700 / delay 1 / decay 5 / SUBINDUSTRY / truncation 0.08 / maxTrade ON /
   且同样属 `pattern_scores`（pv）。未测过混腿，优先级最高的下一步。
 - 若能把正交腿的单腿 S 提到 1.3+，65% 的价格权重就有余量继续往 60% 压，
   从而把 prod corr 进一步往 0.65 推，而不必担心 ladder 崩塌。
+
+---
+
+### 2026-11-04 — 第二条 GBR alpha：纯 pattern 四腿（`rKRergP3` 提交 ACTIVE）
+
+背景：`ZYQbbVnj`（ftse + 52w + breakaway_gap_up，65% 价格族）已是本账号唯一 ACTIVE。
+第二条要能提交，必须同时过 `SELF_CORRELATION`（信号级 0.7）与 `PROD_CORRELATION`（族级 0.7）。
+
+**一、族扫描结论（GBR/TOP700 d1，均 FULL）**
+
+- **GBR 有 `shortinterest3`（18 字段，coverage 0.82–0.87）**，但**所有字段都是 event inputs**：
+  `ts_rank` → `Operator ts_rank does not support event inputs`；改用 `ts_backfill` **同样报错**。
+  即借券族目前无法接入标准 rank/ts_rank 骨架，暂不可作混腿。
+- `institutions*` / `insider*` / `model238` / `model53` / `model36` 单腿 S 全部 0.1–0.4，独立不可用；
+  且掺进 pattern 骨架 ≥20% 权重会**打死 `IS_LADDER_SHARPE`**（1.28–1.42 vs 1.58）。
+- 可用的第二条强腿都在 `pattern_scores`：
+
+| 字段 | 方向表达式 | 单腿 FULL S | 与 ZYQ 日收益 corr |
+|---|---|---:|---:|
+| `breakaway_gap_down_mean_simscore_lookback60` | `rank(ts_rank(...,252))` | **+1.06** | +0.48 |
+| `cont_v_bottom_mean_simscore_lookback60` | `rank(-ts_rank(...,252))` | **+1.10** | — |
+| `common_gap_down_mean_simscore_lookback120` | `rank(-ts_rank(...,252))` | +0.93 | +0.15 |
+| `desc_triangle_mean_simscore_lookback60` | 反号 | +0.31 | −0.15 |
+
+> `cont_v_bottom` 用正号时 S = **−1.10**，与 BGD 几乎反向对冲（50/50 混出 −0.13）——符号必须反用。
+
+**二、`PROD_CORRELATION` 实测：同族恒定 0.72–0.77，与权重/配比无关**
+
+6 次提交全部 403，**均未消耗配额**（FAIL 1–13 次 POST 即给判定书），且 **`SELF_CORRELATION` 全部 PASS**
+（代理日收益 corr 0.42–0.58）。⇒ 自相关不再是闸门，唯一闸门是 prod corr。
+
+| Alpha | 构成（VB / BGD / CGD / 异族） | S | IS_LADDER | 代理 corr | **PROD_CORR** |
+|---|---|---:|---|---:|---:|
+| `Xg9JXkO5` | .20 / .45 / .35 / — | 1.75 | 2.27 PASS | 0.558 | **0.7245** ✅最低 |
+| `npvPwjq8` | .25 / .45 / .30 / — | 1.78 | 2.32 PASS | 0.573 | 0.7354 |
+| `zq3bX2WG` | .30 / .40 / .30 / — | 1.76 | 2.45 PASS | 0.554 | 0.7367 |
+| `KPJrqvYg` | .15 / .35 / .35 / 13F .15 | 1.69 | 2.10 PASS | 0.498 | 0.7404 |
+| `LLMZq1n2` | .25 / .30 / .45 / — | 1.60 | 2.50 PASS | 0.455 | 0.7592 |
+| `O0A8qmVq` | .20 / .35 / .45 / — | 1.64 | 2.40 PASS | 0.478 | 0.7680 |
+| **`rKRergP3`** ✅ | .20 / .30 / .25 / **分析师 .25** | **1.76** | **2.32 PASS** | 0.534 | **PASS → ACTIVE** |
+
+读法（重要）：
+
+- **GBR 反转/形态族的 prod corr 有 0.72–0.77 的硬地板**：把代理相关从 0.55 压到 0.42 完全没用
+  （0.7592 / 0.7680 反而更高）。⇒ 与自研权重无关，是**族级/风格级饱和**。
+- 真正把它压下去的是**换经济风格**：唯一过线的那条是掺了 **25% 分析师下调计数**
+  （`predictive_starmine` 的 `analyst_downgrade_count_30d_4`，`rank(-ts_delta(...,20))`），
+  同时把 pattern 权重降到 75%、并让 VB 与 BGD 各让出 10–15 个点。
+- 13F（`market_value_institutional_shares_acquired/(acquired+disposed)`）在 12–15% 只能微降（≈0.74），
+  20% 以上 ladder 崩（1.42）；**分量不够，换不来过线**。
+
+**三、最终提交物（`rKRergP3`，2026-11-04T08:47:37-05:00 提交，status=ACTIVE）**
+
+```fastexpr
+0.25*rank(-ts_delta(analyst_downgrade_count_30d_4, 20))
++ 0.20*rank(-ts_rank(cont_v_bottom_mean_simscore_lookback60, 252))
++ 0.30*rank(ts_rank(breakaway_gap_down_mean_simscore_lookback60, 252))
++ 0.25*rank(-ts_rank(common_gap_down_mean_simscore_lookback120, 252))
+```
+GBR / TOP700 / d1 / decay 5 / SUBINDUSTRY / trunc 0.08 / maxTrade ON / FULL：
+S=**1.76**、F=**1.18**、TO=14.75%、Ret=6.64%、DD=5.05%、margin=0.0009、long 420 / short 413；
+`IS_LADDER_SHARPE` PASS 2.32/2.02、`LOW_SUB_UNIVERSE` PASS 1.06/0.83、`CLUSTER_TEST` PASS 1.35。
+与 `ZYQbbVnj` 的日收益 corr = 0.534。
+
+**四、可复用的两条规则**
+
+1. **GBR 第二条 alpha 的必要条件不是"相关性更低"，而是"经济风格不同"**：同族内怎么调权重都在 0.72–0.77。
+   可用的风格切换腿 = `predictive_starmine` 的分析师评级下调计数（`ts_delta` 取变化量，cov 0.946）。
+2. **提交探测是廉价进度条**：同族 6 条候选 403 总耗时 < 1 分钟、不消耗配额，
+   而每条 200-POST 到 ACTIVE 的成功路径要 10–80 次 POST ⇒ 先用 403 把 prod corr 摸清再决定是否继续。
