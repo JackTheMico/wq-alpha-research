@@ -48,13 +48,26 @@ def test_load_snapshot_returns_field_list():
 
 
 def test_load_snapshot_caches_index(tmp_path, monkeypatch):
-    """首次加载后 fields_index.json 应被创建/更新。"""
-    monkeypatch.setattr("field_snapshot.SNAPSHOT_DIR", SNAPSHOT_DIR)
+    """首次加载后索引应被创建。用 tmp 目录隔离，不再改写仓库里的 fields_index.json。"""
+    monkeypatch.setattr("field_snapshot.SNAPSHOT_DIR", tmp_path)
+    (tmp_path / "fields_usa_top3000_delay1.json").write_text("[]", encoding="utf-8")
     load_snapshot("usa", "top3000", 1)
-    index_path = SNAPSHOT_DIR / "fields_index.json"
+    index_path = tmp_path / "fields_index.json"
     assert index_path.exists()
     index = json.loads(index_path.read_text(encoding="utf-8"))
     assert any(s["region"] == "usa" for s in index["snapshots"])
+
+
+def test_index_not_rewritten_when_unchanged(tmp_path, monkeypatch):
+    """重复加载同一快照不能改写 updated_at（否则每次跑测试仓库都会变脏）。"""
+    monkeypatch.setattr("field_snapshot.SNAPSHOT_DIR", tmp_path)
+    (tmp_path / "fields_usa_top3000_delay1.json").write_text("[]", encoding="utf-8")
+    load_snapshot("usa", "top3000", 1)
+    index_path = tmp_path / "fields_index.json"
+    first = index_path.read_text(encoding="utf-8")
+    load_snapshot("usa", "top3000", 1)
+    load_snapshot("usa", "top3000", 1)
+    assert index_path.read_text(encoding="utf-8") == first
 
 
 def test_check_snapshot_age_fresh(tmp_path):

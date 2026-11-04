@@ -73,6 +73,17 @@ BLOCKING_CHECKS = {
     "REGULAR_SUBMISSION", "OLD_SIMULATION",
 }
 
+# 「仿真后 WARNING、提交时 FAIL」的检查 —— 本地必须按 FAIL 口径预判。
+# 实测（2026-11-03，EUR，代价是一次提交额度）：
+#   is.checks 里 `IS_LADDER_SHARPE = WARNING, value=0.88, limit=1.58`
+#   提交 403 判定书里 `IS_LADDER_SHARPE = FAIL, value=0.88, limit=1.58`
+# 同一组 value/limit，两种裁定。所以 **WARNING 不可采信**，只要 value < limit 就当阻断。
+STRICT_BLOCKING_CHECKS = {"IS_LADDER_SHARPE", "LOW_2Y_SHARPE"}
+
+# 提交前的实操下限：ladder 类检查要求 ≥ FAIL 阈值才算"值得占用一次提交额度"。
+# 纯 PASS 口径（×0.85 折后约 1.35）留的余量太小，实测 0.88 这种量级基本不可能过。
+GATE_LADDER_MIN_RATIO = 1.0
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "instrumentType": "EQUITY",
     "region": "USA",
@@ -90,6 +101,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 # 多仿真内部必须一致的设置（文档：REGION, DELAY, LANGUAGE, INSTRUMENT TYPE）
 MULTI_SIM_INVARIANT = ("type", "instrumentType", "region", "delay", "language")
+
+# `settings` 允许出现的键。不在表内的键会被平台以 400 `Unexpected property` 拒绝，
+# 且报错只提属性名、不提是哪一层，极难定位（实测把 `name=` 当关键字参数传进来，
+# `name` 会漏进 settings 并触发 400）。这里前置拦截，改为本地可读错误。
+VALID_SETTING_KEYS = frozenset(DEFAULT_SETTINGS) | {
+    "maxTrade", "maxPosition", "testPeriod", "unitHandling",
+    "pasteurization", "nanHandling", "instrumentType", "selectionHandling",
+    "selectionLimit", "componentActivation", "lookback", "maxStockWeight",
+    "minStockWeight", "capital", "holidayHandling", "tradeWhen",
+    "simulationMode",
+}
 
 
 class BrainError(RuntimeError):
@@ -146,11 +168,26 @@ def build_payload(
     sim_type: str = "REGULAR",
     **overrides: Any,
 ) -> dict:
-    """构造 POST /simulations 的请求体。overrides 覆盖 settings 中的同名键。"""
+    """构造 POST /simulations 的请求体。overrides 覆盖 settings 中的同名键。
+
+    对未知设置键做前置拦截。**不要往这里传 `name`** —— 平台 schema 里没有这个
+    属性，它会漏进 settings 并被拒为 400 `Unexpected property: name`；变体的名字
+    属于脚本层的元数据，不要进 payload。
+    """
     merged = dict(DEFAULT_SETTINGS)
     if settings:
         merged.update(settings)
     merged.update(overrides)
+
+    unknown = sorted(set(merged) - VALID_SETTING_KEYS)
+    if unknown:
+        hint = ""
+        if "name" in unknown:
+            hint = "（变体名字是脚本元数据，不能进 settings；请从 build_payload 参数里去掉 name=）"
+        raise BrainError(
+            f"payload.settings 含未知属性 {unknown}，平台会返回 400 Unexpected property{hint}。"
+            f"合法键见 VALID_SETTING_KEYS。"
+        )
     return {"type": sim_type, "settings": merged, "regular": expression}
 
 
@@ -481,14 +518,59 @@ class BrainSession:
         result.payload = payload
         return result
 
+    @staticmethod
+    def multi_sim_group_key(payload: dict) -> tuple:
+        """多仿真分组键：只有 `MULTI_SIM_INVARIANT` 内的 5 项决定能否同批。"""
+        settings = payload.get("settings") or {}
+        return tuple(
+            payload.get("type") if key == "type" else settings.get(key)
+            for key in MULTI_SIM_INVARIANT
+        )
+
     def run_many(
         self, payloads: Sequence[dict], *, batch_size: int = 8, verbose: bool = False
     ) -> list[SimulationResult]:
-        """把 payloads 切成 ≤batch_size 的多仿真批次依次执行。
+        """把 payloads 按多仿真不变项分组，组内切成 ≤batch_size 批次依次执行。
+
+        **自动分组**：`region / delay / instrumentType / language / type` 不同的 payload
+        不能进同一批（平台报 `多仿真 region 不一致: AMR != EUR`）。这里按这 5 项分桶，
+        跨区域 / 跨 delay 的 payload 混在一个 list 里也不会整批失败——实测这个报错
+        会让一整轮研究脚本在提交阶段 1 秒内死掉，白等一次。
+        返回顺序与入参顺序严格一致（内部记录下标回填）。
 
         顾问最多 8 个并发多仿真；这里保守串行，避免触发资源错误
         （"The simulation requires more resources than are available"）。
         """
+        payloads = list(payloads)
+        if not payloads:
+            return []
+
+        groups: dict[tuple, list[int]] = {}
+        for idx, payload in enumerate(payloads):
+            groups.setdefault(self.multi_sim_group_key(payload), []).append(idx)
+
+        if len(groups) > 1 and verbose:
+            desc = ", ".join(
+                f"({'/'.join(str(x) for x in key)})×{len(idxs)}" for key, idxs in groups.items()
+            )
+            print(f"payload 跨 {len(groups)} 个多仿真组，自动分组串行：{desc}")
+
+        ordered: list[Optional[SimulationResult]] = [None] * len(payloads)
+        for key, idxs in groups.items():
+            subset = [payloads[i] for i in idxs]
+            if verbose and len(groups) > 1:
+                print(f"-- 组 {'/'.join(str(x) for x in key)}：{len(subset)} 个")
+            for pos, res in enumerate(
+                self._run_batch(subset, batch_size=batch_size, verbose=verbose)
+            ):
+                if pos < len(idxs):
+                    ordered[idxs[pos]] = res
+        return [r for r in ordered if r is not None]
+
+    def _run_batch(
+        self, payloads: Sequence[dict], *, batch_size: int = 8, verbose: bool = False
+    ) -> list[SimulationResult]:
+        """执行同一多仿真不变项下的 payload（已由 `run_many` 分好组）。"""
         payloads = list(payloads)
         results: list[SimulationResult] = []
         if not payloads:
@@ -668,99 +750,202 @@ class BrainSession:
         except (TypeError, ValueError):
             return None
 
-    def gate_report(self, alpha: dict, *, delay: Optional[int] = None) -> tuple[bool, list[str]]:
-        """按顾问级阈值给出可读的提交判定（本地前置检查）。"""
+    @staticmethod
+    def pending_checks(alpha: dict) -> list[str]:
+        """尚未回算的检查名。
+
+        `SELF_CORRELATION` / `PROD_CORRELATION` / `POWER_POOL_CORRELATION` 在仿真后
+        恒为 `PENDING`，平台只在**提交那一刻**才回算；因此拿 `None` 当作"无相关性"
+        是错误解读，只能当作"未知"。这个函数把"未知"显式暴露出来。
+        """
+        checks = (alpha.get("is") or {}).get("checks") or []
+        return [c.get("name") for c in checks if c.get("result") == "PENDING"]
+
+    def gate_report(
+        self,
+        alpha: dict,
+        *,
+        delay: Optional[int] = None,
+        strict: bool = True,
+    ) -> tuple[bool, list[str]]:
+        """按顾问级阈值给出可读的提交判定（本地前置检查）。
+
+        `strict=True`（默认）比 `ok` 更保守：`STRICT_BLOCKING_CHECKS` 里的检查即使
+        在仿真后显示 `WARNING`，只要 `value < limit` 就判为阻断——因为提交时平台会
+        把同样数值重新裁定为 `FAIL`（实测 IS_LADDER_SHARPE 0.88/1.58）。传
+        `strict=False` 可退回旧口径（只看 FAIL/ERROR），仅用于复盘对照。
+
+        注意：返回 True 仍只是**必要条件**。`PROD_CORRELATION` 无法本地预测
+        （见 §5.2），所以 True 不等于"一定能过"。
+        """
         is_ = alpha.get("is") or {}
         delay = delay if delay is not None else int((alpha.get("settings") or {}).get("delay", 1))
         th = self.thresholds(delay)
-        msgs: list[str] = []
-        ok = True
+        blockers: list[str] = []
+        notes: list[str] = []
 
         sharpe, fitness = is_.get("sharpe"), is_.get("fitness")
         turnover = is_.get("turnover")
         if sharpe is not None and sharpe < th["sharpe"]:
-            ok = False
-            msgs.append(f"Sharpe {sharpe:.2f} < 门槛 {th['sharpe']:.2f}（D{delay} 顾问级）")
+            blockers.append(f"Sharpe {sharpe:.2f} < 门槛 {th['sharpe']:.2f}（D{delay} 顾问级）")
         if fitness is not None and fitness < th["fitness"]:
-            ok = False
-            msgs.append(f"Fitness {fitness:.2f} < 门槛 {th['fitness']:.2f}（D{delay} 顾问级）")
+            blockers.append(f"Fitness {fitness:.2f} < 门槛 {th['fitness']:.2f}（D{delay} 顾问级）")
         if turnover is not None:
             lo, hi = th["turnover"]
             if not lo <= turnover <= hi:
-                ok = False
-                msgs.append(f"Turnover {turnover:.2%} 不在 [{lo:.0%}, {hi:.0%}]")
+                blockers.append(f"Turnover {turnover:.2%} 不在 [{lo:.0%}, {hi:.0%}]")
 
-        for name, check in self.checks(alpha).items():
+        checks = self.checks(alpha)
+        for name, check in checks.items():
             if name not in BLOCKING_CHECKS:
                 continue
             result = check.get("result")
+            value, limit = check.get("value"), check.get("limit")
+            suffix = f"（value={value}, limit={limit}）" if value is not None else ""
             if result in ("FAIL", "ERROR"):
-                ok = False
-                detail = check.get("value")
-                limit = check.get("limit")
-                suffix = f"（value={detail}, limit={limit}）" if detail is not None else ""
-                msgs.append(f"{name} = {result}{suffix}")
+                blockers.append(f"{name} = {result}{suffix}")
+            elif strict and name in STRICT_BLOCKING_CHECKS and result == "WARNING":
+                try:
+                    below = float(value) < float(limit) * GATE_LADDER_MIN_RATIO
+                except (TypeError, ValueError):
+                    below = True  # 拿不到数值时按最坏情况处理
+                if below:
+                    blockers.append(
+                        f"{name} = WARNING{value}/{limit}，提交时会被裁定为 FAIL（实测行为）"
+                    )
 
         # 相关性：ACTIVE alpha 的数值不在 checks 里，单独取
         for label, val in (
             ("SELF_CORRELATION", self.self_correlation(alpha)),
             ("PROD_CORRELATION", self.prod_correlation(alpha)),
         ):
-            if val is not None and val >= 0.7:
-                ok = False
-                msgs.append(f"{label} = {val:.4f} ≥ 0.7（除非新 Sharpe ≥ 冲突因子 × 1.1）")
-        return ok, msgs
+            if val is None:
+                if label in checks:
+                    notes.append(f"{label} 仍未回算（PENDING），只能在提交时得到真实数值")
+                continue
+            if val >= 0.7:
+                blockers.append(f"{label} = {val:.4f} ≥ 0.7（除非新 Sharpe ≥ 冲突因子 × 1.1）")
+            elif val >= 0.5:
+                notes.append(f"{label} = {val:.4f} 已接近 0.7，按历史实测偏低估 0.1 左右")
+
+        return (not blockers), blockers + notes
 
 
 def submit_verified(
-    brain: BrainSession, alpha_id: str, *, polls: int = 20, interval: float = 10.0
+    brain: BrainSession,
+    alpha_id: str,
+    *,
+    max_posts: int = 100,
+    max_wait: float = 300.0,
+    verbose: bool = False,
+    status_check_every: int = 5,
 ) -> str:
-    """提交并二次确认是否真正上线。
+    """提交并拿到最终判定（返回值是可直接落盘的判定串）。
 
-    文档与实测一致：`POST /alphas/{id}/submit` 返回 201 只表示请求被接受，
-    必须轮询 `status == ACTIVE`。
+    **正确姿势是「反复 POST」，不是「GET 轮询 alpha」**（2026-11-03 实测，代价是差点误判）：
 
-    另外两种静默失败要单独识别：
-      * **201 吞提交**：返回 201 但 `dateSubmitted` 始终为 None、status 卡 `UNSUBMITTED`
-        —— 提交被丢弃，SELF_CORRELATION 也就永远不会开始算。
-      * **403 硬封锁**：账户提交配额耗尽，无 `Retry-After`，立刻重试无效。
-        但实测（2026-10-30）403 也可能是**相关性 FAIL**：BRAIN 会把完整 IS checks
-        塞进 403 响应体，此时不能用「配额耗尽」一概而论，必须解析 body。
+      * 提交计算期间，`POST /alphas/{id}/submit` 返回 **200 + `Retry-After` + 空 body + 无 Location**；
+        此时 alpha 仍 `UNSUBMITTED`、`dateSubmitted` 仍 `None` —— 这是"还在算"，不是失败。
+      * 必须按 `Retry-After` **反复 POST 同一端点**，实测约 **38 次 / 90 秒**才落地：
+        `403`（判定书，body 含完整 checks）或 `201`（受理）。
+      * `GET /alphas/{id}/submit` 会一直返回同样的 200+Retry-After，读不到结果；
+        `POST /alphas/{id}/check` 是 405。
+      * 因此本函数不再用 `interval=10` 的 GET 轮询（旧实现 200 秒超时会把正常计算
+        误判成"201 吞提交"）。
 
-    2026-10-30 新增：被吞的 201 之后再 POST 一次，403 响应体就是**最终判定书**。
-    这是拿到 SELF/PROD 相关性真实数值的唯一途径——ACTIVE alpha 的
-    `is.prodCorrelation` 恒为 0.0（平台不回算），轮询永远得不到数值。
+    **PASS 与 FAIL 的 POST 次数极不对称**（2026-11-04 实测 `ZYQbbVnj`）：
+      * FAIL：1–3 次 POST 内就给 403 判定书；
+      * PASS：要 40–80 次 200 才转 `ACTIVE`（POST#11 之后 `Retry-After` 变 None，仍全是 200）。
+    所以循环内每 `status_check_every` 次顺手 `GET /alphas/{id}`，见到 `ACTIVE` 立刻收工，
+    不必陪平台把 POST 次数烧满。
+
+    返回形态：
+      `"ACTIVE"` / `"submit_blocked(NAME=value(limit=...); ...)"` /
+      `"submit_403_quota_exhausted"` / `"submit_429_retry_after=..."` /
+      `"still_UNSUBMITTED(posts=N, waited=..s)"`
     """
+    started = time.time()
+    deadline = started + max_wait
+    posts = 0
     resp = brain.submit(alpha_id)
-    if resp.status_code == 403:
-        detail = submit_verdict(resp)
-        return f"submit_blocked({detail})" if detail else "submit_403_quota_exhausted"
-    if resp.status_code == 429:
-        return f"submit_429_retry_after={resp.headers.get('Retry-After')}"
-    if resp.status_code not in (200, 201):
-        return f"submit_failed({resp.status_code}): {resp.text[:160]}"
 
-    for i in range(polls):
-        time.sleep(interval)
-        alpha = brain.alpha(alpha_id)
-        status = alpha.get("status")
-        if status == "ACTIVE":
-            return "ACTIVE"
-        self_corr = BrainSession.self_correlation(alpha)
-        if self_corr is not None and self_corr >= 0.7:
-            return f"SELF_CORRELATION_{self_corr:.4f}"
-        prod_corr = BrainSession.prod_correlation(alpha)
-        if prod_corr is not None and prod_corr >= 0.7:
-            return f"PROD_CORRELATION_{prod_corr:.4f}"
-        # 201 吞提交判别：2 分钟仍无 dateSubmitted 且停在 UNSUBMITTED
-        if i >= 12 and not alpha.get("dateSubmitted") and status == "UNSUBMITTED":
-            # 再 POST 一次：BRAIN 会把带完整 IS checks 的判定书放在 403 响应体里。
-            retry = brain.submit(alpha_id)
+    while True:
+        posts += 1
+        code = resp.status_code
+
+        if code == 403:
+            detail = submit_verdict(resp)
+            if verbose:
+                print(f"  POST#{posts} 403 判定书: {detail or '(无 FAIL 项=配额耗尽)'}")
+            return f"submit_blocked({detail})" if detail else "submit_403_quota_exhausted"
+        if code == 429:
+            return f"submit_429_retry_after={resp.headers.get('Retry-After')}"
+        if code not in (200, 201):
+            return f"submit_failed({code}): {resp.text[:160]}"
+
+        retry_after = resp.headers.get("Retry-After")
+        wait = float(retry_after) if retry_after else 1.5  # 没 Retry-After 也不直接 break — 再 POST
+        if verbose:
+            print(f"  POST#{posts} {code} Retry-After={retry_after} 仍待判定")
+
+        # 成功路径中途收工：成功提交要累积几十次 POST，别等循环跑满
+        # （失败路径 1–3 次就 403 了，走不到这里）
+        if status_check_every > 0 and posts % status_check_every == 0:
+            try:
+                cur = brain.alpha(alpha_id)
+            except Exception:  # 状态查询失败不该打断提交流程
+                cur = {}
+            if cur.get("status") == "ACTIVE" or cur.get("dateSubmitted"):
+                if verbose:
+                    print(f"  收工: status={cur.get('status')} "
+                          f"dateSubmitted={cur.get('dateSubmitted')} posts={posts}")
+                return "ACTIVE"
+
+        # 只有拿到 403 判定书或转 ACTIVE 才算结束。
+        # 201 只表示"请求入队了"，BRAIN 还没开始算；必须继续 POST 直到 403 或 ACTIVE。
+        if posts >= max_posts or time.time() >= deadline:
+            break
+        time.sleep(max(wait, 1.0))
+        resp = brain.submit(alpha_id)
+
+    alpha = brain.alpha(alpha_id)
+    status = alpha.get("status")
+    waited = time.time() - started
+    if verbose:
+        print(f"  收尾: status={status} dateSubmitted={alpha.get('dateSubmitted')} posts={posts} {waited:.0f}s")
+    if status == "ACTIVE" or alpha.get("dateSubmitted"):
+        return "ACTIVE"
+
+    # 兜底：还没拿到判定书就再来几次 POST（每次都可能把判定推出来）
+    for _ in range(3):
+        retry = brain.submit(alpha_id)
+        if retry.status_code == 403:
             detail = submit_verdict(retry)
             if detail:
                 return f"submit_blocked({detail})"
-            return f"submit_swallowed(201 then {retry.status_code})"
-    return f"still_{brain.alpha(alpha_id).get('status')}"
+            return "submit_403_quota_exhausted"
+        if retry.status_code == 201:
+            if brain.alpha(alpha_id).get("status") == "ACTIVE":
+                return "ACTIVE"
+        time.sleep(2.0)
+
+    return f"still_{brain.alpha(alpha_id).get('status')}(posts={posts}, waited={waited:.0f}s)"
+
+
+def submit_verdict_checks(resp: "requests.Response") -> dict[str, Any]:
+    """把提交判定书（403 的 body）解析成结构化字典。
+
+    返回 `{"fails": [{name, value, limit, result}...], "checks": [...]}`；
+    body 不是 JSON 时返回空结构。**`fails` 为空且 HTTP 403 ⇒ 真的是配额耗尽**，
+    两者不能用同一句话概括（历史上曾把相关性 FAIL 误报成配额问题）。
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return {"fails": [], "checks": []}
+    checks = ((body or {}).get("is") or {}).get("checks") or []
+    fails = [c for c in checks if c.get("result") in ("FAIL", "ERROR")]
+    return {"fails": fails, "checks": checks}
 
 
 def submit_verdict(resp: "requests.Response") -> str:
@@ -770,17 +955,112 @@ def submit_verdict(resp: "requests.Response") -> str:
     IS checks（含 SELF_CORRELATION / PROD_CORRELATION 的真实数值）。返回
     `NAME=value(limit=...)` 拼接串；无 FAIL 则返回空串（那才是真的配额耗尽）。
     """
-    try:
-        body = resp.json()
-    except ValueError:
-        return ""
-    checks = ((body or {}).get("is") or {}).get("checks") or []
-    fails = [c for c in checks if c.get("result") in ("FAIL", "ERROR")]
-    if not fails:
-        return ""
     return "; ".join(
-        f"{c.get('name')}={c.get('value')}(limit={c.get('limit')})" for c in fails
+        f"{c.get('name')}={c.get('value')}(limit={c.get('limit')})"
+        for c in submit_verdict_checks(resp)["fails"]
     )
+
+# ---------------------------------------------------------------------------
+# 字段可用性 / 区域覆盖（"这个字段能不能在某区域用" 的唯一可靠来源）
+# ---------------------------------------------------------------------------
+def data_field(brain: BrainSession, field_id: str) -> dict:
+    """取单个字段的完整元数据；不存在返回空 dict。"""
+    resp = brain.request("GET", f"/data-fields/{field_id}")
+    if resp.status_code != 200:
+        return {}
+    return resp.json() or {}
+
+
+def field_coverage(brain: BrainSession, field_id: str) -> list[dict]:
+    """字段在各 `region / universe / delay` 下的可用性条目。
+
+    **元数据结构是个坑**：按 region 的可用性在 `data[]` 数组里，顶层**没有**
+    `regions` 属性。早期代码读顶层 `regions` 会得到空值，从而误判"字段不可用"
+    （实测 returns 字段就因此被判成不可用，实际上 GLB/TOP3000/delay=1 覆盖 1.0）。
+    """
+    return list(data_field(brain, field_id).get("data") or [])
+
+
+def field_regions(brain: BrainSession, field_ids: Iterable[str]) -> set[str]:
+    """收集一批字段出现过的合法 region 代码。
+
+    `/regions`、`/simulations/settings` 都是 404，平台没有公开的区域枚举端点，
+    只能这样反推。实测全集：USA EUR ASI CHN KOR HKG GLB AMR IND GBR DEU ALL
+    —— **没有 "ARC"**（社区文章里常写的 "ARC/GLB" 中 ARC 不是合法代码）。
+    """
+    out: set[str] = set()
+    for fid in field_ids:
+        for entry in field_coverage(brain, fid):
+            if entry.get("region"):
+                out.add(entry["region"])
+    return out
+
+
+def field_availability(
+    brain: BrainSession,
+    field_id: str,
+    *,
+    region: str,
+    universe: Optional[str] = None,
+    delay: Optional[int] = None,
+) -> list[dict]:
+    """按 region / universe / delay 过滤后的可用性条目（含 coverage 与 alphaCount）。
+
+    `alphaCount` 是拥挤度信号，但**低 alphaCount 不等于有信号**：实测
+    `star_val_sector_rank` 在 AMR/TOP600 仅 256 个 alpha、EUR/TOP800 仅 239 个，
+    Sharpe 却只有 0.68 / 0.59；真正可用的是很拥挤的 EUR/TOP2500。
+    """
+    out = []
+    for entry in field_coverage(brain, field_id):
+        if entry.get("region") != region:
+            continue
+        if universe is not None and entry.get("universe") != universe:
+            continue
+        if delay is not None and entry.get("delay") != delay:
+            continue
+        out.append(entry)
+    return out
+
+
+def fields_of_dataset(
+    brain: BrainSession,
+    dataset_id: str,
+    *,
+    region: str = "USA",
+    universe: str = "TOP3000",
+    delay: int = 1,
+    limit: int = 50,
+    max_pages: int = 20,
+) -> list[dict]:
+    """列出某 dataset 在指定 region/universe/delay 下的字段。
+
+    **必须带 `instrumentType=EQUITY`**：实测用 `dataset.id` 过滤时漏掉这个参数，
+    服务端一律返回 400 `Invalid query`（不是空数组，是硬报错），极易误判成
+    "该数据集在本地域不可用"。
+    """
+    out: list[dict] = []
+    offset = 0
+    for _ in range(max_pages):
+        params = {
+            "dataset.id": dataset_id,
+            "region": region,
+            "universe": universe,
+            "delay": delay,
+            "instrumentType": "EQUITY",
+            "limit": limit,
+            "offset": offset,
+        }
+        resp = brain.request("GET", "/data-fields", params=params)
+        brain._raise_for(resp, f"列出 dataset {dataset_id} 的字段")
+        body = resp.json() or {}
+        page = list(body.get("results") or [])
+        out.extend(page)
+        count = body.get("count")
+        offset += len(page)
+        if not page or (count is not None and offset >= int(count)):
+            break
+    return out
+
 
 def simulate_one(
     brain: BrainSession,
@@ -842,12 +1122,22 @@ __all__ = [
     "SimulationResult",
     "CONSULTANT_THRESHOLDS",
     "DEFAULT_SETTINGS",
+    "GATE_LADDER_MIN_RATIO",
+    "STRICT_BLOCKING_CHECKS",
+    "VALID_SETTING_KEYS",
     "aligned_corr",
     "as_pairs",
     "build_payload",
+    "data_field",
+    "field_availability",
+    "field_coverage",
+    "field_regions",
+    "fields_of_dataset",
     "load_credentials",
     "print_row",
     "simulate_one",
+    "submit_verdict",
+    "submit_verdict_checks",
     "submit_verified",
     "to_returns",
 ]

@@ -14,11 +14,15 @@ from typing import Optional
 
 REPO = Path(__file__).resolve().parent.parent
 SNAPSHOT_DIR = REPO / "references"
-INDEX_PATH = SNAPSHOT_DIR / "fields_index.json"
 MAX_AGE_DAYS = 30
 
 # 分页拉取字段的 API
 DATA_FIELDS_URL = "https://api.worldquantbrain.com/data-fields"
+
+
+def get_index_path() -> Path:
+    """索引文件路径。按当前 SNAPSHOT_DIR 动态解析，便于测试隔离（不要在导入时固化）。"""
+    return SNAPSHOT_DIR / "fields_index.json"
 
 
 def get_snapshot_path(region: str, universe: str, delay: int) -> Path:
@@ -41,28 +45,41 @@ def check_snapshot_age(path: Path, *, max_days: int = MAX_AGE_DAYS) -> tuple[boo
 
 
 def _load_index() -> dict:
-    if INDEX_PATH.exists():
+    index_path = get_index_path()
+    if index_path.exists():
         try:
-            return json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+            return json.loads(index_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
     return {"snapshots": []}
 
 
 def _save_index(index: dict) -> None:
-    INDEX_PATH.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+    get_index_path().write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _update_index(region: str, universe: str, delay: int, field_count: int) -> None:
-    index = _load_index()
+    """登记/刷新索引条目。
+
+    条目内容未变就不落盘 —— 否则每次 `load_snapshot()` 都会改写 `updated_at`，
+    让 `references/fields_index.json` 在每次跑测试后都变成"已修改"，仓库永远是脏的。
+    """
     key = f"{region.lower()}_{universe.lower()}_delay{delay}"
+    path_name = f"fields_{region.lower()}_{universe.lower()}_delay{delay}.json"
+    index = _load_index()
+    existing = next((s for s in index["snapshots"] if s.get("key") == key), None)
+    if existing and existing.get("field_count") == field_count and existing.get("path") == path_name:
+        return
+
     snapshots = [s for s in index["snapshots"] if s.get("key") != key]
     snapshots.append({
         "key": key,
         "region": region.lower(),
         "universe": universe.lower(),
         "delay": delay,
-        "path": f"fields_{region.lower()}_{universe.lower()}_delay{delay}.json",
+        "path": path_name,
         "field_count": field_count,
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
@@ -76,12 +93,14 @@ def _fetch_fields_from_api(brain, region: str, universe: str, delay: int) -> lis
     offset = 0
     page_size = 50
     while True:
-        resp = brain.http.get(
-            DATA_FIELDS_URL,
+        resp = brain.request(
+            "GET",
+            "/data-fields",
             params={
                 "region": region.upper(),
                 "universe": universe.upper(),
                 "delay": delay,
+                "instrumentType": "EQUITY",   # 硬必填，漏掉会 400 Invalid query（SKILL §7.10）
                 "limit": page_size,
                 "offset": offset,
             },

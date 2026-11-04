@@ -62,8 +62,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("alpha_id")
     ap.add_argument("--do-submit", action="store_true", help="复核通过后真正提交")
-    ap.add_argument("--polls", type=int, default=24)
-    ap.add_argument("--interval", type=float, default=10.0)
+    ap.add_argument("--max-posts", type=int, default=100, help="反复 POST submit 的上限（FAIL 约 1-3 次出判定，PASS 要 40-80 次转 ACTIVE）")
+    ap.add_argument("--max-wait", type=float, default=300.0, help="等待判定书的总秒数")
     args = ap.parse_args()
 
     brain = BrainSession(credential_file=str(Path(__file__).resolve().parent.parent / "credential.txt"))
@@ -78,7 +78,9 @@ def main() -> int:
         return 0
 
     print("\n>>> 提交中 ...")
-    outcome = submit_verified(brain, args.alpha_id, polls=args.polls, interval=args.interval)
+    outcome = submit_verified(
+        brain, args.alpha_id, max_posts=args.max_posts, max_wait=args.max_wait, verbose=True
+    )
     print(f">>> 结果: {outcome}")
 
     alpha = brain.alpha(args.alpha_id)
