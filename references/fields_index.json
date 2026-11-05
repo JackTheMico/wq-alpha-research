@@ -17,6 +17,15 @@
       "path": "fields_gbr_top700_delay1.json",
       "field_count": 10000,
       "updated_at": "2026-11-04T11:31:07+00:00"
+    },
+    {
+      "key": "eur_top2500_delay1",
+      "region": "eur",
+      "universe": "top2500",
+      "delay": 1,
+      "path": "fields_eur_top2500_delay1.json",
+      "field_count": 10000,
+      "updated_at": "2026-11-05T03:25:40+00:00"
     }
   ]
 }

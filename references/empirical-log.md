@@ -662,3 +662,63 @@ S=**1.76**、F=**1.18**、TO=14.75%、Ret=6.64%、DD=5.05%、margin=0.0009、lon
    可用的风格切换腿 = `predictive_starmine` 的分析师评级下调计数（`ts_delta` 取变化量，cov 0.946）。
 2. **提交探测是廉价进度条**：同族 6 条候选 403 总耗时 < 1 分钟、不消耗配额，
    而每条 200-POST 到 ACTIVE 的成功路径要 10–80 次 POST ⇒ 先用 403 把 prod corr 摸清再决定是否继续。
+
+## 2026-11-05 · `fnd6_miisa`（少数股东损益）族的可用性与跨数据集混腿（EUR/TOP2500）
+
+**一、字段可用性（第一道坑）**
+
+- `fnd6_miisa` 在 **USA 不存在**（USA snapshot 4367 字段里没有该 id）；只有
+  EUR（TOP400–2500，coverage 0.50，TOP2500 alphaCount=8）、ASI/MINVOL1M（148）、
+  CHN/TOP2000U（2）、GBR/TOP700（0.31）、DEU/TOP500（0.44）、ALL。
+- **EUR 的 fundamental6 只有 279 条字段，且只剩 NCI 这一支**：裸名 `fnd6_at` / `fnd6_sale` /
+  `fnd6_ib` / `fnd6_ceq` 在 EUR 全部 unknown。想构建比率，分母必须来自别的 dataset
+  （`equity_to_equityholders`、`assets_total_2`、`dividends_noncontrolling_interest` 等，
+  均属 fundamental23，coverage 0.76–0.89）。这正好把"跨数据集搭配"从可选变成必需。
+
+**二、单腿（EUR/TOP2500/d1，decay 0，SUBINDUSTRY，8 条）**
+
+| 信号 | S | TO |
+|---|---:|---:|
+| `(fnd6_ibmiisa−fnd6_miisa)/equity_to_equityholders`（母公司 ROE） | 0.88 | 2.4% |
+| `(fnd6_ibmiisa−fnd6_miisa)/assets_total_2`（母公司 ROA） | 0.82 | 2.1% |
+| `fnd6_miisa/equity_to_equityholders` | 0.71 | 2.0% |
+| `fnd6_miisa/ibmiisa`（少数股东分走比例） | 0.67 | 1.9% |
+| `mibt/(mibt+equity)` | 0.11 | — |
+| 同信号套 `group_rank(ts_rank(...,504))` | 0.25 / −0.29 | — |
+
+⇒ **ts_rank 会把该族信号打散**（与价格/分析师族相反），单腿天花板 0.88，不能单独交付。
+
+**三、混腿梯度（12 条，全部 FULL）**
+
+| 结构 | S | F | TO | IS_LADDER | SUB_UNIV |
+|---|---:|---:|---:|---|---|
+| 0.50 母公司 ROE + 0.50 反转252（INDUSTRY, d10） | 1.57 | 0.85 | 23.2% | FAIL | FAIL |
+| 0.4/0.35/0.25（含 EBITDA/EV）（INDUSTRY, d10） | 1.70 | 1.07 | 18.2% | 1.19 FAIL | 0.62 FAIL |
+| 同上换 SUBINDUSTRY | 1.85 | 1.14 | 19.1% | 1.12 FAIL | 0.84 FAIL |
+| 同上 + 派息腿 0.20（四腿） | 1.87 | 1.19 | 17.3% | 1.58 边界 | 0.87 FAIL |
+| 反转腿 0.28→0.33→0.35→0.38（**最终**，末档叠加 d6） | 1.87→1.96→2.00→**2.24** | 1.14 | 33.0% | **PASS 2.39/2.21** | **PASS 1.19/1.16** |
+
+**四、最终提交物（`RREAx3Na`，2026-11-05T00:20:51-05:00，status=ACTIVE）**
+
+```fastexpr
+0.27*rank(ts_backfill((fnd6_ibmiisa - fnd6_miisa)/(abs(equity_to_equityholders)+0.01),60))
++ 0.38*group_rank(-ts_rank(returns,252),subindustry)
++ 0.15*group_rank(ts_rank(fnd17_ebitda2ev_a,126),subindustry)
++ 0.20*group_rank(ts_rank(dividends_noncontrolling_interest/(abs(fnd6_mibt)+0.01),252),subindustry)
+```
+EUR/TOP2500/d1 / **decay 6** / SUBINDUSTRY / trunc 0.08 / FULL：
+S **2.24**、F **1.14**、TO 33.0%、Ret 8.48%、DD 4.89%；`IS_LADDER` PASS 2.39/2.21、
+`LOW_SUB_UNIVERSE` PASS 1.19/1.16、`CONCENTRATED_WEIGHT` PASS；
+`is.selfCorrelation = 0.0`、**`is.prodCorrelation = 0.6761`**（PASS，距 0.7 仅 0.024）。
+
+**五、可复用结论**
+
+1. **decay 对该混合是双刃**：d10→S 1.75 / d6→S 2.24，ladder 由 FAIL 转 PASS；但再低到 d0 换手会破 70% 的风险上升。
+   规律与 §5.1.4 ⑩ 一致：表达式已含 `ts_rank` 时，decay 与内部窗口共用一个平滑预算。
+2. **`ts_backfill(...,60)` 是免费提升**：S 1.81→1.88、F 1.17→1.24——因为 `fnd6_miisa` 覆盖率只有 0.5，
+   补值让有效票数变多，也顺带缓解 `LOW_SUB_UNIVERSE`。
+3. **提权反转腿是同时修 Sharpe 与 sub-universe 的唯一一刀**（0.28→0.38：S +0.36、sub 0.87→1.19），
+   而换 neutralization（MARKET / cap 中性）全部更差。
+4. **提交耗时再创新高**：`max_posts=100`（182 秒）仍是 200/UNSUBMITTED，再补 10 次才转 ACTIVE ⇒
+   成功路径可达约 110 次 POST，脚本上限至少设 150。
+5. **prod corr 在 ACTIVE 上这次可读（0.6761）**，推翻了"PASS 后恒为 0.0"的旧说法；读数非 0 时应作为同族基线。

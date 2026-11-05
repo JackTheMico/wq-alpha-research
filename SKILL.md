@@ -404,6 +404,64 @@ rank(ts_rank(comprehensive_income_net_tax / sales * sales / assets, 126))
 | 混合因子 | 4–20 | INDUSTRY/SUBINDUSTRY | 0.08 | ON | 10–20% |
 | 情绪 | 4–10 | INDUSTRY | 0.05–0.08 | ON | 8–30% |
 
+### 4.4 少数股东损益族（`fnd6_miisa`）：可用性与已验证结构（2026-11-05）
+
+**可用性（关键：USA 没有这个字段）**
+
+| Region / Universe | coverage | alphaCount |
+|---|---:|---:|
+| USA / TOP3000 | **不存在** | — |
+| EUR / TOP2500 | 0.50 | **8** |
+| EUR / TOP400–1200 | 0.50 | 7–176 |
+| ASI / MINVOL1M | 0.50 | 148 |
+| CHN / TOP2000U | 0.50 | 2 |
+| GBR / TOP700 | 0.31 | 少 |
+| DEU / TOP500 | 0.44 | 少 |
+
+EUR 的 `fundamental6` 只有约 279 个字段，**且只有 NCI 这一支**——裸名 `fnd6_at` / `fnd6_sale` /
+`fnd6_ib` 在 EUR 全部不可用。所以分母必须来自别的 dataset（这正是跨数据集搭配的入口）：
+
+| 字段 | dataset | EUR/TOP2500 cov | 作用 |
+|---|---|---:|---|
+| `fnd6_miisa` | fundamental6 | 0.50 | 少数股东损益（利润表） |
+| `fnd6_ibmiisa` | fundamental6 | 0.50 | 扣少数股东损益前的合并利润 |
+| `fnd6_mibt` | fundamental6 | 0.50 | 少数股东权益（资产负债表） |
+| `equity_to_equityholders` | fundamental23 | 0.89 | 归属母公司股东权益 |
+| `assets_total_2` | fundamental23 | 0.84 | 总资产 |
+| `dividends_noncontrolling_interest` | fundamental23 | 0.76 | 支付给少数股东的股息 |
+| `current_minority_interest` | fundamental23 | 0.81 | 当期少数股东权益 |
+
+**单腿实测（EUR/TOP2500/d1，decay 0，SUBINDUSTRY，rank 而非 ts_rank）**
+
+| 信号 | Sharpe | TO | 说明 |
+|---|---:|---:|---|
+| `(ibmiisa−miisa)/equity_to_equityholders`（母公司 ROE） | **0.88** | 2.4% | 本族最强单腿 |
+| `(ibmiisa−miisa)/assets_total_2`（母公司 ROA） | 0.82 | 2.1% | 与 ROE 近等价 |
+| `miisa/equity_to_equityholders` | 0.71 | 2.0% | 少数股东资本占用（取负号同效） |
+| `miisa/ibmiisa`（少数股东分走的利润占比） | 0.67 | 1.9% | 负向盈余质量 |
+| `mibt/(mibt+equity_to_equityholders)` | 0.11 | — | 结构复杂度，基本无效 |
+| 同一信号套 `group_rank(ts_rank(...))` | **0.25 / −0.29** | — | **ts_rank 会把该族信号打散，别套** |
+
+**已验证可提交结构（4 腿，NCI 族合计 47%）**
+
+```fastexpr
+0.27*rank(ts_backfill((fnd6_ibmiisa - fnd6_miisa)/(abs(equity_to_equityholders)+0.01),60))
++ 0.38*group_rank(-ts_rank(returns,252),subindustry)
++ 0.15*group_rank(ts_rank(fnd17_ebitda2ev_a,126),subindustry)
++ 0.20*group_rank(ts_rank(dividends_noncontrolling_interest/(abs(fnd6_mibt)+0.01),252),subindustry)
+```
+
+EUR/TOP2500/d1，**decay 6**，SUBINDUSTRY，trunc 0.08 → `RREAx3Na` **ACTIVE**：
+S 2.24 / F 1.14 / TO 33.0% / Ret 8.48% / DD 4.89%，IS_LADDER PASS 2.39/2.21、
+LOW_SUB_UNIVERSE PASS 1.19/1.16、`is.prodCorrelation = 0.6761`（PASS，贴近 0.7）。
+
+三条复用结论：
+1. **miisa 单腿只到 0.88，不能单独交付**；它的价值是正交搭配（配上 252 日反转后混合 Sharpe
+   1.57→1.85→2.24）。反转腿 0.28→0.38 是同时抬 Sharpe 和修 `LOW_SUB_UNIVERSE` 的关键一刀。
+2. **该混合对 decay 敏感**：d10 → S 1.75 / d6 → S 2.24，且 ladder 由 FAIL 转 PASS。
+   与"已含 `ts_rank` 时加大 decay 会二次平滑"一致，别照搬基本面默认 decay=0。
+3. **`ts_backfill(...,60)` 是免费提升**：S 1.81→1.88、F 1.17→1.24，因为 miisa 覆盖率只有 0.5。
+
 ---
 
 ## 5. 指标与检查
@@ -1227,23 +1285,25 @@ from wq_api import submit_verdict
 detail = submit_verdict(resp)   # "PROD_CORRELATION=0.8045(limit=0.7)" 或 ""（空=真配额耗尽）
 ```
 
-这是**唯一**能拿到相关性真实数值的途径：`is.prodCorrelation` 在 ACTIVE alpha 上恒为 `0.0`（平台不回算，与 `POWER_POOL_CORRELATION` 同为僵尸字段），轮询一万年也读不到。因此 403 必须先解析 body，只有 body 里没有 FAIL 项时才是真的配额耗尽。
+FAIL 时这是**最可靠**的取值途径。`is.prodCorrelation` 在 ACTIVE alpha 上**多数时候**为 `0.0`（平台不回算，与 `POWER_POOL_CORRELATION` 同为僵尸字段），但**并非恒定**——2026-11-05 实测刚转 ACTIVE 的 `RREAx3Na` 上读到 `is.prodCorrelation = 0.6761`（PASS，limit 0.7）。所以：403 必须先解析 body，只有 body 里没有 FAIL 项时才是真的配额耗尽；ACTIVE 后可以顺手读一次 `is.prodCorrelation`，读到非 0 值就记下来当同族的经验基线，读到 0.0 就按"不可知"处理。
 
 **坑三：`/alphas` 集合端点对部分账号返回 405** — 既不能 `GET` 枚举，也不能 `POST` 建 alpha；只能 `GET /alphas/{id}` 按 id 查。此时"提交前拉全部 alpha 算日收益相关"不可行，只能依赖信号成分重叠护栏 + BRAIN 自己的信号级相关性。`BrainSession.alphas()` 遇到 405 会抛错，请捕获后退化为按 id 查。
 
-**坑四：PASS 时永远读不到 `PROD_CORRELATION` 的数值（2026-11-04）** — 判定书只在
-**FAIL** 时回传 `PROD_CORRELATION=0.7621(limit=0.7)`；一旦 PASS，alpha 直接转 `ACTIVE`，
-`is.prodCorrelation` 依旧是 `0.0`。所以：
-- 能拿到的只有"FAIL 时的具体数值"和"PASS 这个事实"，**没有 PASS 时的数值**；
-- 打靶时把 FAIL 的数值当进度条用（例如 0.7621 → 0.7510 → 0.7155），不要指望提交成功后能验收具体值；
-- 反过来也意味着**"我这条 alpha 的 prod corr 是多少"这个问题，在过线之后无法回答**，别在报告里编数字。
+**坑四：PASS 时通常读不到 `PROD_CORRELATION`，但偶发可读（2026-11-04 / 2026-11-05 修正）** — 判定书只在
+**FAIL** 时回传 `PROD_CORRELATION=0.7621(limit=0.7)`；PASS 转 `ACTIVE` 后 `is.prodCorrelation`
+多数情况是 `0.0`，但 2026-11-05 的 `RREAx3Na` 上读到 **0.6761**。所以：
+- **FAIL 数值**一定拿得到，可当进度条（0.7621 → 0.7510 → 0.7155）；
+- **PASS 数值**属于"有时能读到"：读到就写进报告并作为同族基线，读到 `0.0` 就写"不可知"，别编数字；
+- 别把 `0.0` 解释成"完全不相关"——它也可能只是平台没回算。
 
-**坑五：成功提交的 POST 次数远多于失败（约 40–80 次）** — 2026-11-04 实测 `ZYQbbVnj`：
+**坑五：成功提交的 POST 次数远多于失败（40–110+ 次）** — 2026-11-04 实测 `ZYQbbVnj`：
 POST#1 起 201→200 交替、POST#11 后 `Retry-After` 变 `None`、一直到 POST#80 全部 `200`，
 最后 `GET /alphas/{id}` 才显示 `status=ACTIVE, dateSubmitted=2026-11-04T03:47:19`。
-而 FAIL 的 alpha 通常在 1–3 次 POST 内就给 403。⇒ **`max_posts` 别设太小**（≥60），
-且循环内应每 5–10 次 POST 顺手 `GET /alphas/{id}` 一次，见到 `ACTIVE`/`dateSubmitted` 立刻收工，
-否则成功路径会白烧掉全部 POST 额度（`submit_verified` 已按此加了中途状态检查）。
+2026-11-05 `RREAx3Na` 更长：`submit_one.py` 跑满 `max_posts=100`（182 秒）仍是
+`200 + Retry-After=1.0`、`status=UNSUBMITTED`，接着**继续 POST 到第 10 次**（共约 110 次）才转 ACTIVE。
+而 FAIL 的 alpha 通常在 1–3 次 POST 内就给 403。⇒ **`max_posts` 至少设 150**，
+且循环内每 5–10 次 POST 顺手 `GET /alphas/{id}` 一次，见到 `ACTIVE`/`dateSubmitted` 立刻收工；
+**跑满上限仍是 200 不代表失败**，重新发起一轮 POST 即可接着算（`submit_verified` 会从头计数）。
 
 ### 7.8 重复仿真去重（省额度）
 
@@ -1382,6 +1442,7 @@ fields_of_dataset(brain, "model38", region="EUR", universe="TOP2500", delay=1)
 | `GET /data-fields?dataset.id=X` 漏 `instrumentType=EQUITY` | `400 Invalid query`（不是空数组） | 该参数是硬必填，漏了会误判成"数据集在本地域不可用" |
 | `GET /data-fields&limit=200` | `400 Invalid query` | **`limit` 上限是 50**；必须用 `offset` 翻页（2026-11-04 实测） |
 | 把响应当数组 | `TypeError` / 空 | 响应体是 `{"count": N, "results": [...]}`，翻页读 `results` |
+| 用本地快照判断"字段不存在" | 误判，例如 EUR/TOP2500 快照 10,000 条里**完全没有 fundamental6** | 快照有 10,000 条上限且按某种顺序截断。**要确认某 dataset 在不在**，直接 `GET /data-fields?instrumentType=EQUITY&region=..&universe=..&delay=1&dataset.id=..&limit=50` 翻页查（2026-11-05 实测 EUR 的 fundamental6 有 279 条，只是没进快照） |
 
 拥挤度（`alphaCount`）的用法见 §9.1——它是 `PROD_CORRELATION` 唯一可用的本地代理，
 但**低 alphaCount 不等于有信号**（§10 第 21 条）。
@@ -1767,3 +1828,4 @@ python scripts/evolve_skill.py --max-pnl-fetch 30
 | 2026-11-03 | 社区 ARC/GLB 模板复现：GLB 结构性不可达，EUR 打通后被 PROD_CORRELATION 否决（7 批 47 次仿真） | GLB 的 EMEA 门槛不可达（13 次最高 0.77）；EUR 靠"平滑对冲腿 + 收窄窗口"打通，但 ladder 0.88 与 prod corr 0.8314 双双 FAIL |
 | 2026-11-04 | GBR/TOP700 价格反转族改造：`ts_rank` 窗口 22→126 是决定性杠杆，加 52 周高/均线相对腿（alphaCount 9–50）后 S 0.82→1.78 | 窗口长度比 decay 重要得多；**GBR 大盘是反 52 周高点**（该腿须反号）；QUICK 的 Sharpe 在 GBR 系统性高估 0.45，定稿必须 FULL |
 | 2026-11-04 | `PROD_CORRELATION 0.7621` 被拒后换族混腿：三族 20 条单腿实测 + 权重 sweep，最终 65% 价格族 + 35% `pattern_scores` → **`ZYQbbVnj` ACTIVE**（S 1.78 / F 1.51 / ladder 2.07） | **prod corr 是族级判定，唯一旋钮是正交族权重（每 5% ≈ −0.03）**；65% 是 `PROD_CORRELATION ≤ 0.70` 与 `IS_LADDER ≥ 1.58` 的唯一交集；正交腿 `ts_rank` 窗口越长 corr 越低且 Sharpe 不降 |
+| 2026-11-05 | `fnd6_miisa`（少数股东损益）跨数据集混腿：单腿最好 0.88，4 腿混合 `RREAx3Na` 提交 **ACTIVE**（S 2.24 / F 1.14 / TO 33%，prod corr **0.6761**） | **USA 无 `fnd6_miisa`，只能跑 EUR/ASI/CHN/GBR/DEU**；EUR 的 fundamental6 只剩 NCI 一支，分母必须借 fundamental23（`equity_to_equityholders`）；该混合对 decay 敏感（d10→d6 时 S 1.75→2.24、ladder FAIL→PASS），`ts_backfill(...,60)` 可白赚 0.07 Sharpe |
