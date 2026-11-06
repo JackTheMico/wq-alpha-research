@@ -1687,7 +1687,9 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 > 已知其他族的 prod corr 实测值：EBITDA/EV **0.7785**、短周期反转 **0.9673**、
 > `vector_neut(估值, 市值delta)` **0.8314**、GBR 大盘价格反转（ftse100 相对 + 52 周高 + MA50）**0.7621**、
 > USA/TOP3000「`ts_rank(operating_cash_flow/assets_total_2,504)` + analyst83 会议出席 + 252 日反转」
-> 三腿混合 **0.7588**（权重 35/30/35，d10；改成 30/35/30 与 40/35/25 均不改善）。
+> 三腿混合 **0.7588**（权重 35/30/35，d10；改成 30/35/30 与 40/35/25 均不改善）、
+> ASI/MINVOL10M「`cashflow_op/cap` 40% + analyst4 EPS 修正 25% + 252 日反转 35%」（decay 4 / SECTOR）
+> **0.7244**（最低实测；同骨架去掉分析师腿为 0.876）。
 > 这几族在全局池已饱和，别再投裸版本；要用就先按 §8.4 混进 ≥35% 的正交族重量。
 
 ### 9.2 Checklist
@@ -1839,3 +1841,4 @@ python scripts/evolve_skill.py --max-pnl-fetch 30
 | 2026-11-06 | 上述 3 腿的 prod corr 权重 sweep（35/30/35 → 30/35/30 → 40/35/25，另试 REV 45%） | **权重对 prod corr 无效**（0.7588/0.7613/0.7508/0.8601）；原因是 `fundamental23` 与 `pv1` 反转**同时在饱和**，改任一项都只是换哪个拥挤源主导；§8.4.3 的 −0.03/5% 只适用于「拥挤源是价格族」的骨架 |
 | 2026-11-06 | 同一现金流×反转骨架换 region：GBR/DEU（快因子区）、EUR/TOP2500、KOR/TOP600、ASI/MINVOL1M 全测 | **`operating_cash_flow` 是 USA 专属裸名**，EUR 等价物是 `fnd23_ofc`（ac 17）；GBR/DEU 只有 pv1 + 事件数据 cov 0.32 ⇒ 事件腿变噪声（单腿 −0.47）；EUR 的 OCF 族 S 1.55–1.70 但 **ladder 0.44–0.68 FAIL**；**只有 ASI/MINVOL1M 成立：`0.50*rank(cashflow_op/cap)+0.50*rank(-ts_rank(returns,252))` → S 2.09 / F 1.42 / ladder 2.06 PASS，2014–2023 全正** |
 | 2026-11-06 | ASI 上面的候选 `VkxZg7n0` 提交 403 = `LOW_ROBUST_UNIVERSE_*`（ratio 1.8/1.88、ret 0.0875/0.0922），非 prod corr | **ASI 的 robust 门槛 = 主 universe 指标的 90%**；MINVOL1M 上该比例结构性地锁在 0.86–0.87，权重/decay/中性化/trunc 全改不动（trunc 0.04 与 0.08 输出完全相同，疑被钳位）。**换 MINVOL10M 才过 robust**：`qMLObadv`（SECTOR/decay 5）S 1.81 / F 1.18 全检查 PASS，但提交 403 **PROD_CORRELATION 0.876** ⇒ ASI 同族也已饱和 |
+| 2026-11-06 | 正交第三腿换族（USA: SBC/buzz/attendance；ASI: analyst4 EPS 修正） | **USA 三条正交腿单腿全废**（SBC −0.25 / buzz −0.35 / 出席变更 −0.30），混合后 −0.35–0.03，方向在 USA 不成立；**ASI 的 analyst4 极冷（alphaCount 1–3）、EPS 修正 126 天单腿 S 0.88，混入 25% 后把 prod corr 从 0.876 压到 0.7244**（S 1.86 / F 1.21 / JPN 1.01 / ladder 2.13 / robust 全 PASS），但仍差 0.024；**再加分析师权重会先打死 JPN 子区**（35% → 0.82、40% → 0.71），所以这条路的上限就是「接近但过不去」 |

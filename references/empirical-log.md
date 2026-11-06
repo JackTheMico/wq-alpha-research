@@ -862,3 +862,49 @@ SUB_UNIVERSE 2.09/0.62；年度 2014–2023 **全正**（3.30/2.15/2.57/2.01/2.2
    与 USA 的 0.7588 同源；该族在 prod 里已被同类 alpha 占满，靠调参无法脱困。
 5. 可复用结论：**ASI 优先检查 robust universe 比例再谈提交**（门槛 = 主 universe 的 90%），
    MINVOL1M 这类小宇宙先天吃亏；MINVOL10M 能过 robust 但换来的 S/F 更低，且 prod corr 更危险。
+
+**九、按用户方向加「正交第三腿」的一轮（2026-11-06，USA 8 次 + ASI 21 次 FULL）**
+
+目标：给「现金流 × 252 日反转」换一条与拥挤源正交的经济风格腿（分析师修正 / 事件计数）。
+
+（1）USA/TOP3000：三条候选正交腿单腿全废，混合更差（无一条 S > 0.1）
+
+| 腿 | 表达式 | 单腿 S | 混入 3–4 腿后 |
+|---|---|---:|---|
+| 现金流质量 | `rank(ts_rank(operating_cash_flow/assets_total_2,504))` | 0.09 | — |
+| 股权激励负担（fundamental2，ac 3–9） | `rank(-(allocated_sbp_expense_total/(assets_total_2+0.01)))` | −0.25（DD 42%） | 0.03–−0.17 |
+| 社媒热度（socialmedia12，ac 120） | `rank(ts_mean(snt_buzz_ret_fast_d1,5))` | −0.35（TO 32%） | −0.09–−0.35 |
+| 电话会议出席强度变化（analyst83） | `rank(ts_delta(vec_sum(buyside_attendance_count),5))` | −0.30 | 同上 |
+⇒ **USA 这条路线不成立**：单腿全在 0 附近，且 SBC 腿 DD 42%、buzz 腿 TO 32%，
+不是「权重没调好」而是信号本身没有方向。
+
+（2）ASI 的 `analyst4` 是可用且极冷的正交源（291 个字段，关键信号 alphaCount 1–3）
+
+| 字段 | ac | cov | 经济含义 |
+|---|---:|---:|---|
+| `anl4_fs_detail_estimates_basic_af_v4_nd_eps_median` | 1 | 0.94 | 一致预期 EPS 中位数 |
+| `..._eps_std` | 1 | 0.55 | 预期分歧（取负向，单腿 −0.09、DD 40%，不可用） |
+| `..._eps_number` | 2 | 0.56 | 覆盖分析师数（关注度） |
+| `sales_estimate_dispersion` | 3 | 0.54 | 营收预期分歧 |
+
+EPS 修正腿（`ts_delta(eps_median,126)/abs(+0.01)`）单腿 S **0.88**、TO 4.4%，是唯一可用的一条。
+
+（3）三腿扫描（ASI/MINVOL10M/SECTOR，maxTrade ON，全 FULL）
+
+| 权重 CF/修正/反转 | decay | S | F | TO | ladder | JPN | robust |
+|---|---:|---:|---:|---:|---|---|---|
+| 40/30/30（修正窗口 63） | 6 | 1.82 | 1.39 | 18.4% | PASS | — | FAIL |
+| 40/30/30（修正窗口 63） | 5 | 1.87 | 1.37 | 20.8% | PASS | — | FAIL（1.67/1.68） |
+| 45/30/25 | 4 | 1.83 | 1.34 | 20.0% | FAIL 1.56 | — | FAIL |
+| 40/30/30（窗口 126） | 4 | **1.82** | 1.24 | 23.7% | PASS 2.12 | **0.92 FAIL** | PASS |
+| 40/25/35 | 4 | **1.86** | 1.21 | 27.1% | PASS 2.13 | **1.01 PASS** | PASS |
+
+（4）`88RVampX`（40/25/35，decay 4）提交 **403 PROD_CORRELATION=0.7244(limit=0.7)**：
+**分析师腿把 prod corr 从同骨架的 0.876 压到 0.7244（−0.15）**，方向是对的，但还差 0.025。
+
+（5）加不动了：分析师腿 25%→35% 时 prod 有望再降，但 **JPN 子区先崩**
+（35/35/30 → JPN 0.82、35/40/25 → 0.72、30/40/30 → 0.71），而 JPN ≥ 1 是 ASI 硬门槛。
+⇒ ASI 的三腿结构存在 **「prod corr ≤ 0.7 ↔ JPN ≥ 1」的窄窗口**，在 40/25/35 处同时贴线
+（JPN 1.01、prod 0.7244）。要真正过线需要**更强的分析师腿**（换 sales 修正/多期限合成），
+而不是继续动权重。
+
