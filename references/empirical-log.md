@@ -944,3 +944,46 @@ EPS 修正腿（`ts_delta(eps_median,126)/abs(+0.01)`）单腿 S **0.88**、TO 4
 换字段不能换族。要脱困必须换到**非 analyst4、非 pv1 反转**的第三族（如 fundamental17 的 FCF 口径、
 期权/事件类），代价是当前 Sharpe 组合会被打散——这是下一个方向的入口。
 
+**十一、ASI 的期权/事件族：期权族不存在，事件族太弱（2026-11-06，1 次枚举 + 10 次 FULL）**
+
+（1）**期权族在 ASI 完全不存在**。`GET /data-sets`（ASI/MINVOL10M/d1）全量 158 个 dataset，
+无任何 `option*` 数据集；不是"单字段缺失"，是整族不可用。因此 ASI 上"期权第三腿"直接排除。
+
+（2）**事件族字段是 event input**。`ts_backfill(field)`、直接 `ts_*` 一律 400：
+
+```
+Operator ts_backfill does not support event inputs.
+```
+
+必须先 `vec_avg` 聚合成日频标量才能进时序算子（`ts_mean(vec_avg(f), 20)`）。
+
+可用性与单腿（ASI/MINVOL10M/d1，decay 4 / SECTOR / trunc 0.08）：
+
+| dataset | 可用字段 | cov | ac |
+|---|---|---|---:|
+| event_stock_model | `earnings_financial_event_score_2` / `corporate_structure_event_score_2` | 0.897 / 0.739 | 4 / 4 |
+| news104 | `nws104_marketimpactscore` / `nws104_sentiment` / `nws104_novelty` | 0.680 | 0 |
+| news36 | `event_impact_value` / `entity_relevance_score` | 0.597–0.684 | 0 |
+| news20 | `nws20_ghc_lna` / `nws20_event_sentiment_score` | 0.57–0.768 | 1–2 |
+| corporate_news_index | `general_document_presence_flag` | 0.346 | 5 |
+| event_relation | `relation_strength_score_general` | **0.425 / 0.282** | 0–2 |
+
+排除项：`event_relation` cov 0.28–0.43（近 6 成 NaN，截面退化为噪声）；
+`news36` 的 `event_effect_magnitude` / `event_influence_score` 官方标注 future feature、cov = 0。
+
+| 单腿 | 表达式 | S | TO | DD | 备注 |
+|---|---|---:|---:|---:|---|
+| evt_avg | `rank(vec_avg(earnings_financial_event_score_2))` | 0.78 | 28.5% | 4.8% | 2Y 0.35 FAIL |
+| evt_avg20 | `rank(ts_mean(vec_avg(同上), 20))` | 0.76 | 4.3% | 6.8% | 2Y 0.14 FAIL |
+| news_avg20 | `rank(ts_mean(vec_avg(nws104_marketimpactscore), 20))` | 0.31 | 11.8% | 13.5% | — |
+| news_sum5 | `rank(ts_sum(vec_avg(同上), 5))` | −0.05 | 26.7% | 20.4% | 反向 |
+| fcf_ttm | `rank(fnd17_fcfmtt / cap)` | 1.08 | 2.6% | 11.8% | ladder 1.57 WARNING |
+| fcf_q | `rank(fnd17_fcfq / cap)` | 0.75 | 3.8% | 13.9% | ladder 1.32 FAIL |
+
+（3）结论：**ASI 这条骨架的第三腿空间关闭**。
+事件族单腿上限 0.78 且 2Y Sharpe FAIL，混 25% 只会把主腿 1.86 拖到 1.3 量级、TO 抬高，
+而正交性无法在提交前验证（prod corr 只在 submit 回算），性价比为零。
+`fnd17_fcfmtt` 虽 S 1.08，但 FCF 与主腿 `cashflow_op` 同属现金流经济族——**换 dataset 不换族**，
+与第十节的 sales 腿教训一致。叠加第九/十节：ASI 该骨架同时被 **robust 90% 结构与 prod corr
+0.72–0.74** 两道天花板锁死，不再继续挖。
+
