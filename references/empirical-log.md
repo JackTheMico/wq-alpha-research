@@ -722,3 +722,87 @@ S **2.24**、F **1.14**、TO 33.0%、Ret 8.48%、DD 4.89%；`IS_LADDER` PASS 2.3
 4. **提交耗时再创新高**：`max_posts=100`（182 秒）仍是 200/UNSUBMITTED，再补 10 次才转 ACTIVE ⇒
    成功路径可达约 110 次 POST，脚本上限至少设 150。
 5. **prod corr 在 ACTIVE 上这次可读（0.6761）**，推翻了"PASS 后恒为 0.0"的旧说法；读数非 0 时应作为同族基线。
+
+---
+
+## 2026-11-06 · 会议出席 × 经营现金流：2014–2020 全亏的根因与 3 腿改造（USA/TOP3000）
+
+**一、用户原式与年度形态**
+
+```fastexpr
+trade_when(vec_count(buyside_attendance_count)>0, rank(operating_cash_flow), -1)
+```
+USA/TOP3000/d1 / decay 0 / SUBINDUSTRY / QUICK，`xArlllWg`：
+
+| 年 | 2014 | 2015 | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| S | −0.28 | −0.15 | −0.51 | −0.54 | −0.25 | −0.45 | **+0.42** | **+2.50** | **+1.62** | +0.14 |
+
+全期 S **0.28**、F **0.06**、TO 1.6%。
+
+**二、根因（三条，均经对照仿真证伪/证实）**
+
+1. **`rank(operating_cash_flow)` 是绝对金额排名 ⇒ 规模/龙头暴露**，不是现金流信号。
+   对照：把分母换成 `assets_total_2`（S 0.27）或 `cap`（S 0.15）后，**年度形态完全不变**
+   （2015–2020 仍全负）⇒ 不是"规模 tilt"这么简单，而是价值/质量 vs 成长的 regime。
+2. **`trade_when(...,-1)` 让信号几乎冻结**：只在电话会议事件日换仓，TO 1.2%，
+   等于用几次陈旧的大类 tilt 撑整条曲线。去掉门控后同信号 S 0.27→0.46。
+3. **`vec_count` 只数"当天有几条会议记录"**，丢掉"来了多少买方"的强度信息；`nanHandling=OFF`。
+
+**三、可用字段（实测元数据）**
+
+| 字段 | dataset | type | coverage | alphaCount |
+|---|---|---|---:|---:|
+| `buyside_attendance_count` | analyst83 | VECTOR | 0.763 | **1** |
+| `count_questions_buyside_qa` / `buyside_word_count_qa` | analyst83 | VECTOR | 0.76 | 1–2 |
+| `operating_cash_flow` | fundamental23 | MATRIX | 1.00 | 88 |
+| `assets_total_2` | fundamental23 | MATRIX | 1.00 | 48 |
+
+analyst83 的 sentiment 字段 coverage 只有 **0.0086**，不可用。
+
+**四、改造过程（QUICK 筛选 + FULL 定稿）**
+
+| 候选 | S | F | TO | 判断 |
+|---|---:|---:|---:|---|
+| 单腿 OCF/assets | 0.27 | 0.06 | 1.8% | 太弱 |
+| 单腿 OCF/cap | 0.15 | 0.04 | — | 太弱 |
+| 单腿 `ts_rank(OCF/assets,504)` grouped | 0.75 | — | 3.1% | 方向对 |
+| 单腿 analyst83 出席强度 `vec_sum` ts_mean60 | 0.48 | — | 14.6% | 有独立信息 |
+| OCF + 出席 + 反转126（0.4/0.3/0.3，无 decay） | 1.88 | 0.57 | **73.3%** | TO 超限 |
+| 同上改反转252 + decay10（35/30/35） | 1.88 | 1.25 | 12.9% | ✅ **`QPvWNOqW`** |
+| 同上 0.40/0.30/0.30 | 1.74 | 1.09 | 10.4% | ✅ `N1NKJL6w` |
+| 去反转腿（0.4/0.6 或 0.5/0.5） | 1.08–1.13 | <1.0 | 2–3% | ❌ gate FAIL |
+| fundamental23 → model109（`analyst_eps_revision_ntm_3m`） | 1.10–1.38 | <1.0 | — | ❌ Sharpe 掉穿门槛 |
+
+**最终形态（`QPvWNOqW`，FULL）**
+
+```fastexpr
+0.35*group_rank(ts_rank(operating_cash_flow/assets_total_2, 504), subindustry)
++ 0.30*group_rank(ts_mean(vec_sum(buyside_attendance_count), 60), subindustry)
++ 0.35*rank(-ts_rank(returns, 252))
+```
+decay 10 / SUBINDUSTRY / trunc 0.08：S **1.88**、F **1.25**、TO **12.9%**、Ret 5.72%、DD 3.34%；
+IS checks 全 PASS（ladder 2.68/2.02、sub-universe 1.40/0.81）；年度 **2014 起十年全正**
+（1.69/1.89/0.69/0.41/1.28/1.30/1.43/3.49/2.81/2.56）。
+
+**五、兜底：PROD_CORRELATION 0.7588 拒绝，且权重完全无效**
+
+| 权重（OCF/出席/反转） | S | prod corr |
+|---|---:|---:|
+| 35/30/35（原版） | 1.88 | **0.7588** |
+| 30/35/30 | 1.85 | 0.7613（↑） |
+| 40/35/25 | 1.80 | 0.7508（仅 −0.008） |
+| 10/40/50（放大反转） | 2.15 | **0.8601**（↑↑） |
+
+⇒ **`fundamental23` 与 `pv1` 反转同时在饱和**，改任一腿权重只是换"哪个拥挤源主导"，
+不是降 corr。§8.4.3 的 `−0.03 / 5%` 只对「拥挤源是价格族」的骨架成立。
+**本次结论：该三腿混合在 USA/TOP3000 不可提交；要救只能换 region 或换掉其中一个饱和族。**
+
+**六、可复用结论**
+
+1. **先验证"信号是不是它自己"**：`rank(绝对值)` 一律先怀疑规模。判据是换分母后年度形态是否改变；
+   不变 ⇒ 不是规模问题，是族级 regime，别在窗口/decay 上浪费时间。
+2. **事件类字段不要当开关，要当信号**：`vec_sum(...)` 取强度 + `ts_mean(...,60)`，单腿 0.48 但有独立信息。
+3. **`trade_when(...,-1)` 的隐性代价是"零独立下注"**：TO 1–2% 意味着整条曲线由个位数调仓决定。
+4. **252 日反转腿是唯一能把 2014–2019 翻正的补丁**，但它同时是 prod corr 的第二拥挤源——
+   Sharpe 与 corr 在同一处被锁死，这是本次的死局。

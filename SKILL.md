@@ -1589,6 +1589,10 @@ GBR/TOP700/delay=1 实测：**10,000 字段 / 138 个 dataset / 6,094 个 MATRIX
   75%→65% 却降 **0.0355**（真正起作用的正是这一段）。所以"混一点点"不是"不够"，
   而是**基本没用**；到 35% 正交重量才开始见效。
 - 换算成斜率：有效区间内 **≈ −0.03 / 5 个百分点**（走廊值），别按线性外推。
+- ⚠️ **这条斜率只对「拥挤源是价格族」的骨架成立（2026-11-06 反证）**：当拥挤源是 `fundamental23`
+  （OCF/资产）或 `pv1` 252 日反转、且两者同时在场时，改任一腿的权重对 prod corr **几乎无效**
+  （35%→30% 反而 +0.0025，→25% 只降 0.008，见 §12 2026-11-06）。此时唯一有效动作是**换掉拥挤族本身**，
+  不是调权重。
 - **正交腿的 `ts_rank` 窗口越长，prod corr 越低**（60/100/126/252 → 0.7232/0.7236/0.7184/0.7155），
   而 Sharpe 反而略升（1.73→1.80）。加长窗口 = 让这条腿更像"慢变量"，与价格反转的高频结构脱钩。
 - **过线那一刻还压了最拥挤那条腿**：ftse 腿 0.40 → 0.325，同时 52 周腿 0.30 → 0.325。
@@ -1681,7 +1685,9 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 `AMR/TOP600 alphaCount=256` → 未触及相关性闸门。所以它是风险分级，不是概率预测。
 
 > 已知其他族的 prod corr 实测值：EBITDA/EV **0.7785**、短周期反转 **0.9673**、
-> `vector_neut(估值, 市值delta)` **0.8314**、GBR 大盘价格反转（ftse100 相对 + 52 周高 + MA50）**0.7621**。
+> `vector_neut(估值, 市值delta)` **0.8314**、GBR 大盘价格反转（ftse100 相对 + 52 周高 + MA50）**0.7621**、
+> USA/TOP3000「`ts_rank(operating_cash_flow/assets_total_2,504)` + analyst83 会议出席 + 252 日反转」
+> 三腿混合 **0.7588**（权重 35/30/35，d10；改成 30/35/30 与 40/35/25 均不改善）。
 > 这几族在全局池已饱和，别再投裸版本；要用就先按 §8.4 混进 ≥35% 的正交族重量。
 
 ### 9.2 Checklist
@@ -1829,3 +1835,5 @@ python scripts/evolve_skill.py --max-pnl-fetch 30
 | 2026-11-04 | GBR/TOP700 价格反转族改造：`ts_rank` 窗口 22→126 是决定性杠杆，加 52 周高/均线相对腿（alphaCount 9–50）后 S 0.82→1.78 | 窗口长度比 decay 重要得多；**GBR 大盘是反 52 周高点**（该腿须反号）；QUICK 的 Sharpe 在 GBR 系统性高估 0.45，定稿必须 FULL |
 | 2026-11-04 | `PROD_CORRELATION 0.7621` 被拒后换族混腿：三族 20 条单腿实测 + 权重 sweep，最终 65% 价格族 + 35% `pattern_scores` → **`ZYQbbVnj` ACTIVE**（S 1.78 / F 1.51 / ladder 2.07） | **prod corr 是族级判定，唯一旋钮是正交族权重（每 5% ≈ −0.03）**；65% 是 `PROD_CORRELATION ≤ 0.70` 与 `IS_LADDER ≥ 1.58` 的唯一交集；正交腿 `ts_rank` 窗口越长 corr 越低且 Sharpe 不降 |
 | 2026-11-05 | `fnd6_miisa`（少数股东损益）跨数据集混腿：单腿最好 0.88，4 腿混合 `RREAx3Na` 提交 **ACTIVE**（S 2.24 / F 1.14 / TO 33%，prod corr **0.6761**） | **USA 无 `fnd6_miisa`，只能跑 EUR/ASI/CHN/GBR/DEU**；EUR 的 fundamental6 只剩 NCI 一支，分母必须借 fundamental23（`equity_to_equityholders`）；该混合对 decay 敏感（d10→d6 时 S 1.75→2.24、ladder FAIL→PASS），`ts_backfill(...,60)` 可白赚 0.07 Sharpe |
+| 2026-11-06 | 用户原式 `trade_when(vec_count(buyside_attendance_count)>0, rank(operating_cash_flow), -1)` 2014–2020 全亏、2020 后转正；改造为 3 腿 `QPvWNOqW`（S 1.88 / F 1.25 / TO 12.9%，十年全正）后提交被 **PROD_CORRELATION 0.7588** 拒 | **`rank(operating_cash_flow)` 是规模暴露不是现金流信号**：换成 `/assets_total_2` 或 `/cap` 后年度形态完全不变 ⇒ 是价值/质量 vs 成长的 regime，不是数据 bug；`trade_when(...,-1)` 把换手压到 1.2% 只是把几次陈旧 tilt 冻住。修复靠 `ts_rank(...,504)` + analyst83 事件强度 `vec_sum` + 252 日反转腿 |
+| 2026-11-06 | 上述 3 腿的 prod corr 权重 sweep（35/30/35 → 30/35/30 → 40/35/25，另试 REV 45%） | **权重对 prod corr 无效**（0.7588/0.7613/0.7508/0.8601）；原因是 `fundamental23` 与 `pv1` 反转**同时在饱和**，改任一项都只是换哪个拥挤源主导；§8.4.3 的 −0.03/5% 只适用于「拥挤源是价格族」的骨架 |
