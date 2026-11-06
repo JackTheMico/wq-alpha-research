@@ -806,3 +806,33 @@ IS checks 全 PASS（ladder 2.68/2.02、sub-universe 1.40/0.81）；年度 **201
 3. **`trade_when(...,-1)` 的隐性代价是"零独立下注"**：TO 1–2% 意味着整条曲线由个位数调仓决定。
 4. **252 日反转腿是唯一能把 2014–2019 翻正的补丁**，但它同时是 prod corr 的第二拥挤源——
    Sharpe 与 corr 在同一处被锁死，这是本次的死局。
+
+**七、换 region 的实测（2026-11-06，同一批字段族）**
+
+| region/universe | 可用字段 | 最好结果 | 结论 |
+|---|---|---:|---|
+| USA/TOP3000 | `operating_cash_flow`+`assets_total_2`+analyst83 出席 | S 1.88 / F 1.25 | prod corr 0.7588 ❌ |
+| GBR/TOP700 | 仅 pv1 + analyst83 出席（cov **0.32**），无任何基本面 | S 0.16–0.63；出席单腿 **−0.47** | ❌ 宇宙太小 + 覆盖率太低 |
+| DEU/TOP500 | 同上（cov 0.33） | S 0.78–0.81；出席单腿 0.09 | ❌ |
+| EUR/TOP2500 | `fnd23_ofc`(ac 17)+`assets_total_2`(ac 63)+`fnd23_roe`(ac 10)，**无 analyst83** | S 1.55–1.70 但 **IS_LADDER 0.44–0.68 FAIL**、F 0.7 | ❌ 近年失效 |
+| KOR/TOP600 | `cashflow_op`(cov 0.70)+`fnd17_fcf1a`(ac 23) | S 1.33 / F 0.89 / ladder 0.66 | ❌ |
+| **ASI/MINVOL1M** | `cashflow_op`(ac 3047)+`fnd17_fcf1a`(ac 711)+`returns` | **S 2.09 / F 1.42 / ladder 2.06 PASS** | ✅ **`VkxZg7n0`** |
+
+**关键结论**
+
+1. **`operating_cash_flow` 是 USA 专属**（fundamental23 的该裸名只在美国可用）；EUR 的等价字段是
+   `fnd23_ofc`，但**字段名不同 ≠ 族不同**——迁移时必须先用 `field_availability` 逐字段确认。
+2. **GBR/DEU 是 fast-factor 区域，只有 pv1**，任何"基本面 + 事件"骨架都迁不过去；
+   analyst83 在那里的 coverage 只有 0.32–0.33，事件腿本身变成噪声（单腿负 Sharpe）。
+3. **EUR 的 OCF 族单腿能到 1.55–1.70，但 IS_LADDER 全线 0.44–0.68**——与 §4.4 的 EUR 经验一致：
+   EUR 近年（2021–2023）对现金流/反转混合不友好，必须靠额外正交腿才能过 ladder（`RREAx3Na` 用了 4 腿）。
+4. **ASI/MINVOL1M 是目前唯一同时满足 Sharpe / Fitness / ladder 的区域**：
+
+```fastexpr
+0.50*rank(cashflow_op/cap) + 0.50*rank(-ts_rank(returns, 252))
+```
+ASI/MINVOL1M/d1 / decay 6 / SUBINDUSTRY / trunc 0.08 / **maxTrade ON** → `VkxZg7n0`
+S **2.09**、F **1.42**、TO 22.1%、Ret 10.24%、DD 5.83%；ladder **PASS 2.06/2.02**、
+SUB_UNIVERSE 2.09/0.62；年度 2014–2023 **全正**（3.30/2.15/2.57/2.01/2.25/2.82/**0.13**/2.11/1.76/2.53）。
+`0.45/0.55` 变体 `wpQ3MjXp`：S 2.08 / F 1.36 / ladder 2.04，略差。
+**未提交**（`cashflow_op` alphaCount 3047、`returns` 110420，prod corr 风险 MID，须待显式授权）。
