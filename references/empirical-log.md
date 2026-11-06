@@ -835,4 +835,30 @@ ASI/MINVOL1M/d1 / decay 6 / SUBINDUSTRY / trunc 0.08 / **maxTrade ON** → `VkxZ
 S **2.09**、F **1.42**、TO 22.1%、Ret 10.24%、DD 5.83%；ladder **PASS 2.06/2.02**、
 SUB_UNIVERSE 2.09/0.62；年度 2014–2023 **全正**（3.30/2.15/2.57/2.01/2.25/2.82/**0.13**/2.11/1.76/2.53）。
 `0.45/0.55` 变体 `wpQ3MjXp`：S 2.08 / F 1.36 / ladder 2.04，略差。
-**未提交**（`cashflow_op` alphaCount 3047、`returns` 110420，prod corr 风险 MID，须待显式授权）。
+
+**八、提交实测：ASI 的两道门（2026-11-06）**
+
+1. **`VkxZg7n0` 403 判定书 = `LOW_ROBUST_UNIVERSE_SHARPE.WITH_RATIO=1.8(limit=1.88)`
+   + `LOW_ROBUST_UNIVERSE_RETURNS=0.0875(limit=0.0922)`**，不是 prod corr；配额未扣。
+2. **这两个 limit 恒等于主 universe 指标的 90%**（1.88=0.9×2.09、0.0922=0.9×0.1024）⇒
+   检查实质是「robust 子集必须保留主 universe 90% 的收益与 Sharpe」。
+   MINVOL1M 上该比例结构性卡在 **0.86–0.87**，改什么都不动：
+   | 变体 | 主 S | robust S/limit | robust Ret/limit |
+   |---|---|---|---|
+   | 50/50 基准 | 2.09 | 1.80/1.88 | 0.0875/0.0922 |
+   | 55/45 | 2.06 | 1.77/1.85 | 0.0829/0.0878 |
+   | 60/40 | 2.02 | 1.72/1.82 | 0.0783/0.0835 |
+   | +fcf 三腿 | 2.02 | 1.73/1.82 | 0.0817/0.0870 |
+   | decay 10 | 1.90 | 1.60/1.71 | 0.0755/0.0810 |
+   | MARKET 中性 | 1.70 | 1.44/1.53 | 0.0887/0.0935 |
+   | SECTOR 中性 | 1.86 | 1.59/1.67 | 0.0911/0.0959 |
+   | decay 4 | 2.17 | 1.90/1.95 | 0.0947/0.0983 |
+   另：MINVOL1M 上 **`truncation` 0.04 与 0.08 输出完全相同**（疑被平台钳位）。
+3. **换宇宙是唯一有效杠杆**：`MINVOL10M` + `SECTOR` + `decay 5` → `qMLObadv`
+   S 1.81 / F 1.18 / TO 28.3% / Ret 12.08% / DD 11.8%，robust 两项 **PASS**（1.64/1.63、0.1091/0.1087），
+   ladder 2.12 PASS、JPN 1.24 PASS、sub-universe 1.74 PASS，`submit_one.py` 复核 gate PASS。
+4. **但 `qMLObadv` 提交 403 = `PROD_CORRELATION=0.876(limit=0.7)`**（POST#59 才出判定书，
+   前 58 次 200 全 PENDING 属正常）⇒ **ASI 的「现金流/市值 + 252 日反转」骨架同样已饱和**，
+   与 USA 的 0.7588 同源；该族在 prod 里已被同类 alpha 占满，靠调参无法脱困。
+5. 可复用结论：**ASI 优先检查 robust universe 比例再谈提交**（门槛 = 主 universe 的 90%），
+   MINVOL1M 这类小宇宙先天吃亏；MINVOL10M 能过 robust 但换来的 S/F 更低，且 prod corr 更危险。
