@@ -1134,3 +1134,74 @@ GLB 剩下三条同族候选（`O0AVoLa1`/`Xg9ep9Q1` 等）不要再提交。
 - 同族两次 403（0.7903 / 0.829）即停手，本轮 GLB FCF/EV 族封闭。
 
 
+
+## 十四、2026-11-07 AMR/IND 小宇宙：INDUSTRY 中性化把反转腿抬过门槛，IND 交出一条
+
+**区域可用性**：AMR 只有 TOP600（delay 0/1），IND 只有 TOP500（delay 1）。
+
+（1）反转骨架 FULL（d4 / trunc 0.08 / maxTrade ON / SUBINDUSTRY）单腿实测：
+
+| 区域 | 表达式 | S | F | TO |
+|---|---|---:|---:|---:|
+| AMR | `group_rank(-ts_rank(returns,126),subindustry)` | 1.09 | 0.79 | 11.8% |
+| AMR | `group_rank(-ts_rank(returns,252),subindustry)` | 1.25 | 0.97 | 11.8% |
+| AMR | rev504 / rev756 | 1.17 / 1.11 | 0.89 / 0.82 | 11.8% |
+| AMR | delay 0（rev63/126/252） | 0.69 / 0.64 / 0.73 | — | 11.6% |
+| AMR | decay 10（rev252） | 0.80 | 0.51 | 10.7% |
+| IND | `group_rank(-ts_rank(returns,126),subindustry)` | 1.39 | 0.80 | 21.8% |
+| IND | rev63 / rev504 / rev756 | 1.05 / 0.78 / 0.60 | — | 21.8% |
+
+（2）**换 INDUSTRY 中性化是决定性一步**（同窗口、同 d4）：
+
+| 区域 | SUBINDUSTRY | INDUSTRY | 备注 |
+|---|---|---|---|
+| AMR rev126 / rev63 / rev252 / rev504 | 1.09 / — / 1.25 / 1.17 | **1.37 / 1.39 / 1.38 / 1.23** | AMR 封顶≈1.39 |
+| IND rev126 | 1.39 | **1.71（F 1.10，robust 1.06 PASS）** | 首次过 S/F 双门槛 |
+| IND rev126（SECTOR） | — | 1.40 | SECTOR 无效 |
+
+（3）IND 反转 + EPS 修正（`rank(mean_estimate_change_pct_fy1_earnings_7d_3)`）在 INDUSTRY 下：
+
+| eps 权重 | S | F | TO | IS_LADDER | robust |
+|---|---:|---:|---:|---|---|
+| 0.10 | 2.13 | 1.56 | 21.2% | 2.19/2.02 PASS | 1.19 PASS |
+| 0.15 | 2.17 | 1.60 | 21.1% | 2.08/2.02 PASS | 1.26 PASS |
+| 0.15 + d6 | 2.21 | 1.73 | 19.5% | 2.30/2.02 PASS | 1.22 PASS |
+| 0.20 | 2.21 | 1.65 | 20.9% | 2.09/1.88 PASS | 1.29 PASS |
+| 0.25 | **2.25** | **1.70** | 20.6% | 2.09/1.88 PASS | 1.35 PASS |
+
+> `RREKPjQ1`（eps 0.25）已提交并 **ACTIVE**：prod 0.6684、self 0.0，只用了 10 次 POST。
+> 说明小宇宙里「126 日反转 + 25% EPS 修正」在本账号的 prod 池内可用。
+
+（4）新 check：`LOW_ROBUST_UNIVERSE_SHARPE`（limit 1）
+
+- 只在 INDUSTRY 中性化的 alpha 上出现；`<1` 即 FAIL（IND 纯反转 SUBINDUSTRY 0.67、SECTOR 0.85 都被它判负），
+  但 `wq_api.py` 的 `BLOCKING_CHECKS` 目前不含它——本地 gate 会误报 GO，提交前需人工看数值。
+- `IS_LADDER_SHARPE` 并非每條都有：同一批 SUBINDUSTRY 混合腿出现 1.09/1.58 FAIL，
+  而 INDUSTRY 变体多数不出现或出现即 PASS（TO<30% 时 limit 折到 1.88/2.02）。
+
+（5）AMR 正交腿全部实测（FULL / INDUSTRY 不变，单腿 `rank(field)`）：
+
+| 字段 | S |
+|---|---:|
+| `star_eps_surprise_prediction_fq2` | 0.59 |
+| `mdl26_smahistory_revisions` | 0.59 |
+| `anl4_afv4_cfps_median / close` | 0.51 |
+| `mdl31_a1_roe_pct_t4q` | 0.44 |
+| `mdl38_iv_growth_ear` | 0.22 |
+| `star_val_dividend_projection_fy11` / `anl4_afv4_div_median/close` | 0.17 / 0.14 |
+| `star_cr_dist_to_default` / `mdl37_credit_textscore` | 0.10 / 0.09 |
+| `mdl31_a1_acc_prior_qtr` / `mdl31_a1_erq_re_rk_prior_qtr` / `mdl25_rliq_5v` | −0.08 / −0.04 / −0.03 |
+| `anl11_rocsoptic` / `mdl50_bk_fund_stab` | −0.31 / −0.31 |
+
+**混腿会打崩 AMR**：0.40 rev252 + 0.20 surp + 0.15 sma + 0.15 cfps + 0.10 roe 实际 S=0.79
+（离线「PnL 加权」算出来 1.64，是错的——各腿 PnL 绝对量纲不可比，务必以真实仿真为准）。
+⇒ **AMR 反转族封顶 1.39，正交腿全弱，本轮 AMR 关闭。**
+
+（6）新增规则：
+
+- 小宇宙（AMR/IND）先试 **INDUSTRY 中性化**，比 SUBINDUSTRY 高 0.1–0.3 Sharpe；
+- IND 的可用第三腿只有 EPS 修正族（`analyst_revision_horizons` / `predictive_starmine`），
+  情绪（bull −0.12）与日内（−0.09）单腿全废；`pv30` 只有聚类标签，不能做信号；
+- 不要把「离线 PnL 按权重相加」当混腿预测器（量纲不同），必须真实仿真；
+- AMR 的 `delay 0` 比 `delay 1` 弱约 0.5–0.7，不要为省延迟换 d0；
+- 提交前额外看 `LOW_ROBUST_UNIVERSE_SHARPE ≥ 1`，它在 `gate_report` 里不阻断。
