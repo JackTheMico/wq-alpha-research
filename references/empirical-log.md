@@ -1050,3 +1050,87 @@ USA/TOP3000/d1 coverage **0.8546**，alphaCount **6**（全球极冷）。
 **提交前先默认 prod corr ≈ 0.82**，不要用本地日收益相关做乐观判断；
 一轮内同族提交 ≥2 次仍为 403 即应停止换腿，转非基本面第三腿或换区域。
 
+## 十三、2026-11-07 GLB 迁移：COUNTRY 中性化修好 EMEA，反转腿才是 prod 拥挤源
+
+（1）字段可用性（`GET /data-fields/free_cash_flow_to_enterprise_value` 的 `data[]`）：
+
+| region/universe | coverage | alphaCount |
+|---|---:|---:|
+| HKG/TOP800、TOP500 | 0.734 | 0 |
+| KOR/TOP600 | 0.885 | 0 |
+| GLB/TOP3000、MINVOL1M、MINVOL10M、TOPDIV3000 | 0.831 | 28 |
+| GBR/TOP700 | 0.472 | 0 |
+| DEU/TOP500 | 0.534 | 0 |
+| USA/TOP3000 | 0.855 | 6 |
+
+EUR / ASI / CHN / AMR / IND **不存在**该字段。
+
+（2）单腿 FULL（GLB 与其余区同设置：decay 4、SUBINDUSTRY、trunc 0.08、maxTrade ON、nanHandling ON）：
+
+| region/universe | CHG126 | LVL252 | REV252 | 50/50 混合 |
+|---|---:|---:|---:|---:|
+| HKG/TOP800 | −0.20 | −0.28 | 0.20 | 0.04 |
+| KOR/TOP600 | 0.60 | 0.46 | 0.99 | 1.28 / F 0.70 |
+| GBR/TOP700 | −0.02 | −0.03 | 0.87 | 0.32 |
+| DEU/TOP500 | −0.50 | −0.32 | 0.67 | −0.16 |
+| GLB/TOP3000 | 1.17 | 1.28 | 1.77（TO 70.5%）| **2.35 / F 1.21** |
+
+⇒ 该族只有 GLB 有信号；HKG/GBR/DEU 连方向都不稳定，KOR 不够门槛。
+
+（3）**COUNTRY 中性化修复 GLB 的 EMEA 门槛**（同一条 50/50 骨架，只换 neutralization）：
+
+| neutralization | S | F | TO | ladder | AMER | APAC | EMEA |
+|---|---:|---:|---:|---|---:|---:|---:|
+| SUBINDUSTRY | 2.35 | 1.21 | 32.7% | PASS | 1.31 | 1.56 | **0.70 FAIL** |
+| SECTOR | — | — | — | — | — | — | **0.63 FAIL** |
+| INDUSTRY | — | — | — | — | — | — | **0.67 FAIL** |
+| **COUNTRY** | **2.23** | **1.07** | 30.9% | 2.01/1.90 PASS | **1.40** | **1.59** | **1.38 PASS** |
+
+⇒ 历史「GLB 三子区结构性不可达（15 条候选 EMEA ≤0.77）」的结论**只对 SUBINDUSTRY 成立**。
+去国家 beta 是有效一刀，价格/基本面腿都受国家暴露拖累。
+
+（4）GLB 候选矩阵（d1 / COUNTRY / decay 4）：
+
+| alpha | universe | 结构 | S | F | TO | ladder | AMER/APAC/EMEA | 本地SELF | 提交结果 |
+|---|---|---|---|---:|---:|---:|---|---:|---|
+| `1YNP1XX6` | TOP3000 | .50 CHG+.50 REV | 2.23 | 1.07 | 30.9% | PASS | 1.40/1.59/1.38 | 0.53 | 未提交 |
+| `E56LYpR1` | TOP3000 | .60 CHG+.40 REV | 2.02 | 1.05 | 23.0% | PASS | 1.27/1.46/1.20 | 0.55 | 未提交 |
+| `P0o861Xw` | TOP3000 | .35 CHG+.25 LVL+.40 REV | 2.09 | 1.09 | 24.2% | 2.03/2.02 | 1.30/1.50/1.34 | 0.56 | **403 PROD 0.7903** |
+| `O0AVoLa1` | MINVOL10M | .35/.25/.40 | **2.31** | **1.37** | 25.0% | 2.05/2.02 | 1.60/2.06/1.49 | 0.661 | 未提交 |
+| `Xg9ep9Q1` | MINVOL10M | .30/.20/.50 | 2.52 | 1.35 | 34.0% | 2.47/2.37 | 1.72/2.28/1.62 | 0.641 | 未提交 |
+| `rKRVobb3` | MINVOL10M | .25/.15/.60 | **2.68** | 1.31 | 44.4% | 2.48/2.37 | 1.81/2.43/1.69 | 0.594 | **403 PROD 0.829** |
+
+（5）**决定性的因果：prod corr 随反转权重单调上升，FCF/EV 不是拥挤源。**
+
+- FCF 60% / REV 40%（`P0o861Xw`）→ prod **0.7903**（本地 0.56）
+- FCF 40% / REV 60%（`rKRVobb3`）→ prod **0.829**（本地 0.594）
+- 斜率 ≈ **+0.039 / 每 +20% 反转权重**
+
+⇒ 想压到 0.70 需 FCF 权重 ~100%，而纯 FCF 单腿只有 1.2–1.6 Sharpe，不可行。
+GLB 剩下三条同族候选（`O0AVoLa1`/`Xg9ep9Q1` 等）不要再提交。
+
+（6）GLB 无可用第三正交族（单腿 FULL，COUNTRY/d4，全部实测）：
+
+| 族 | 字段/表达式 | S |
+|---|---|---:|
+| analyst_revision_horizons | 修正幅度净值（4 个口径） | 0.40 / −0.28 / 0.04 / 0.10 |
+| sentiment22 | 情绪净值 | −0.18（TO 102%）|
+| sentiment22 | 情绪净值 20 日平滑 | −0.24（TO 12.8%）|
+| sentiment22 | 情绪动量 20 日 | 0.59（TO 90.1%）|
+| fundamental44 | `fnd44_fscore` | −0.43 |
+| fundamental44 | `−fnd44_mscore` | −0.36 |
+| fundamental44 | `−fnd44_yoon_wc_accruals` | −0.44 |
+| model28 | distance-to-default（反向） | −0.26 |
+| institutions6 | 机构净买入 | 0.32 |
+| institutions18 | 机构持仓比例 | 0.10 |
+
+⇒ GLB 的第三腿空间关闭；「alphaCount=1 ≠ 有信号」再次成立。
+
+（7）新增规则：
+
+- GLB 候选**先跑 COUNTRY**，不要用 SUBINDUSTRY 的 EMEA 判死；
+- GLB 的 `MINVOL10M` 通常比 `TOP3000` 强（S +0.2、EMEA 余量 +0.15）；
+- 骨架含 ≥40% `ts_rank(returns,252)` 时默认 prod ≈ 0.79–0.83，不提交；
+- 同族两次 403（0.7903 / 0.829）即停手，本轮 GLB FCF/EV 族封闭。
+
+

@@ -1660,6 +1660,36 @@ Sharpe 看起来只掉 0.06，但 ladder 是断崖式 FAIL——所以**不能�
   故 ROE/毛利率/现金流变化腿会把 SELF 顶到 0.70–0.77）；PROD 由全站生产池决定。
   一轮内同族 ≥2 次 403 即停手，不再换权重。
 
+#### 8.4.8 换区域：只有 GLB 成立，COUNTRY 中性化修好 EMEA；但反转腿是 prod 拥挤源（2026-11-07）
+
+字段 `free_cash_flow_to_enterprise_value` 在 USA 之外仅 HKG/TOP800、KOR/TOP600、GLB/TOP3000、
+GBR/TOP700、DEU/TOP500 可用（EUR/ASI/CHN/AMR/IND 不存在）。单腿 FULL 实测：HKG/GBR/DEU 全废
+（|S| ≤ 0.87 且方向混乱）、KOR 混合最高 1.28/F 0.70、**只有 GLB 的 `CHG126 + REV252` 混合过线**。
+
+**关键一刀：GLB 用 `COUNTRY` 中性化把 EMEA 从 0.70 拉到 1.38**（同骨架 SUBINDUSTRY 下
+EMEA 0.70 / AMER 1.31 / APAC 1.56；COUNTRY 下 1.38 / 1.40 / 1.59，S 2.23 / F 1.07、ladder PASS）。
+SECTOR（EMEA 0.63）与 INDUSTRY（0.67）均无效。⇒ 「GLB 三子区不可达」的旧结论只对 SUBINDUSTRY 成立，
+**去国家 beta 是有效手段**；判断 GLB 候选必须先跑 COUNTRY。
+
+`MINVOL10M` 比 `TOP3000` 更强、EMEA 余量更大（同骨架 S 2.31 / F 1.37 / EMEA 1.49）。
+
+**但本轮两次 403 揭示了 prod 的真实拥挤源是反转腿，不是 FCF/EV**：
+
+| alpha | universe | FCF / REV 权重 | S | F | TO | 本地SELF | PROD 实测 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `P0o861Xw` | TOP3000 | 60% / 40% | 2.09 | 1.09 | 24.2% | 0.56 | **0.7903** |
+| `rKRVobb3` | MINVOL10M | 40% / 60% | 2.68 | 1.31 | 44.4% | 0.59 | **0.829** |
+
+⇒ **反转权重 ↑ 20% → prod ↑ 0.039**。按此外推，要压到 0.70 需 FCF 权重接近 100%，
+而纯 FCF 腿只有 1.2–1.6 Sharpe，不可行。GLB 的可提交候选（`O0AVoLa1` S 2.31/F 1.37/EMEA 1.49、
+`Xg9ep9Q1` S 2.52/F 1.35）都属同一族，**不要再提交**。
+
+GLB 无可用第三正交族（全部单腿 FULL，COUNTRY/d4）：分析师修正幅度 0.40/−0.28/0.04/0.10、
+`sentiment22` 情绪净值 −0.18（TO 102%）、`fundamental44` fscore −0.43 / mscore −0.36 / accruals −0.44、
+`model28` distance-to-default −0.26、机构净买入 0.32、机构持仓比 0.10。冷门 ≠ 有效再次成立。
+
+规则：GLB 候选一律先试 COUNTRY；含 ≥40% `ts_rank(returns,252)` 的骨架默认 prod ≈ 0.79–0.83，不提交。
+
 ---
 
 ## 9. 提交硬闸门与 Checklist
@@ -1709,7 +1739,9 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 > USA/TOP3000「`ts_rank(operating_cash_flow/assets_total_2,504)` + analyst83 会议出席 + 252 日反转」
 > 三腿混合 **0.7588**（权重 35/30/35，d10；改成 30/35/30 与 40/35/25 均不改善）、
 > ASI/MINVOL10M「`cashflow_op/cap` 40% + analyst4 EPS 修正 25% + 252 日反转 35%」（decay 4 / SECTOR）
-> **0.7244**（最低实测；同骨架去掉分析师腿为 0.876）。
+> **0.7244**（最低实测；同骨架去掉分析师腿为 0.876）、
+> GLB/TOP3000「FCF/EV 60% + 252 日反转 40%」（COUNTRY/d4）**0.7903**、
+> GLB/MINVOL10M「FCF/EV 40% + 252 日反转 60%」**0.829**（反转权重越高 prod 越高）。
 > 这几族在全局池已饱和，别再投裸版本；要用就先按 §8.4 混进 ≥35% 的正交族重量。
 
 ### 9.2 Checklist
