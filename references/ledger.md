@@ -32,7 +32,7 @@
 | IND | intraday_pv_feats | **CLOSED** | −0.08 | 单腿即死 | §15.2 |
 | IND | model28 | **CLOSED** | 0.02 | 单腿即死 | §15.2 |
 | IND | analyst11 | **CLOSED** | 0.22 | 单腿即死 | §15.2 |
-| IND | pv30 | **OPEN** | — | 39 个字段未测 | §15.1 |
+| IND | pv30 | **CLOSED** | −0.25 | 41 个字段全是 PCA/聚类**分组标签**，非价量因子；`group_rank` 报 `Unit[Group:1]` 不匹配，`densify` 同样拒绝；`bucket(...)` 强转后 ladder 0.63 | §15.6 |
 | AMR | reversal 126/252 + INDUSTRY | **CLOSED** | 1.39 | 封顶 1.39；14 条正交腿全 ≤0.59；混腿 0.79 | §14 |
 | AMR | fundamental28 | **CLOSED** | 0.51 | 13 个 ratio 全部 2Y FAIL | §15.4 |
 | AMR | fundamental23 | **UNTESTED** | — | 与 fundamental28 同类切面，预计同死 | §15.4 |
@@ -99,3 +99,17 @@
 | AMR | model16 | `fscore_momentum` | 0.30 | — | CLOSED | §14 |
 | AMR | reversal | `rank(-ts_delta(close,252))` + INDUSTRY | 1.38 | 封顶；正交腿全 ≤0.59 | CLOSED | §14 |
 | AMR | reversal | `rank(-ts_delta(close,126))` + SUBINDUSTRY | 1.25 | INDUSTRY 更好 | CLOSED | §14 |
+| IND | pv30 | `rank(principal_component_3_top1200_xjp_513)` | −0.25 | 2Y −0.66 / Robust −0.11 / SubU −0.22 | CLOSED | §15.6 |
+| IND | pv30 | `group_rank(surprise, bucket(top500_industry_grouping_method4_20, range="0,20,1"))` | 1.58 | Ladder 0.63 / Robust 0.70 FAIL | CLOSED | §15.6 |
+
+---
+
+## 3. 通用规则（从实测和论坛评论沉淀）
+
+| 规则 | 证据 |
+|---|---|
+| **计数类字段（`*_count` / `*_number` / `*_num`）不要做主信号** | 论坛 `post 36093116182423` 评论：纯计数因子同批 Sharpe 仅 0.10；本仓 IND `analyst_upward_revision_count_*` 实测 0.63 |
+| **计数类字段做过滤项也要看 coverage**，覆盖不足的变体会整批 `LOW_ROBUST` 失败 | 同上 |
+| **PCA / 聚类分组字段在 IND 不可用于 `group_rank`** | §15.6：报 `Unit[Group:1]`，`densify` 也报同样错误 |
+| **日内/微观结构思路必须蒸馏成日频稳定代理**，直接用会死 | 论坛 `post 36223563506839`；本仓 `intraday_pv_feats` 实测 −0.08 |
+| **期权希腊字母类思路在 IND 不可实现**（该区无期权数据集） | §15.1 字段池扫描 |
