@@ -188,6 +188,10 @@ resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
 
 ### 4.1 高胜率模板
 
+> **社区模板一律不贴进 SKILL.md。** 它们体积是 O(N) 增长的，用检索：
+> `python scripts/kb.py search "regression_neut"` / `kb.py templates --dataset fundamental6` /
+> `kb.py pull "alpha template" -n 10`（论坛抓取入库）。验证过或否都记回 `references/ledger.md`。
+
 #### 4.1.1 数据集一致性硬门槛（套模板前强制，先于一切构造）
 
 **规则**：用户给定字段后，所选模板的**主信号字段**必须与用户字段属于**同一 dataset**（以本地字段快照或 `GET /data-fields/{id}` 为准）。不一致 → 判定**混信号** → **立即停止执行**（不模拟、不提交），向用户报告冲突字段清单，等待用户换字段或换模板。**不允许**以"权重调低""只当过滤项"等理由放行。

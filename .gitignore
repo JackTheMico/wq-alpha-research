@@ -43,3 +43,7 @@ scripts/v4_tune.py
 scripts/v5_clean_submit.py
 scripts/v5_tune.py
 scripts/v6_demarket.py
+
+# 论坛知识库（本地语料，含个人抓取记录）
+wq_knowledge.db
+wq_knowledge.db-journal
