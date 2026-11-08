@@ -103,7 +103,7 @@
 | IND | pv30 | `group_rank(surprise, bucket(top500_industry_grouping_method4_20, range="0,20,1"))` | 1.58 | Ladder 0.63 / Robust 0.70 FAIL | CLOSED | §15.6 |
 | EUR | other460 | `rank(oth460_3l_caic)`（财报科目趋势预测概率） | −0.50 | 2Y 0.37 FAIL | CLOSED | §16.2 |
 | EUR | news20 | `rank(nws20_multiple_comp_d1_qep)`（新闻情绪分） | — | **ERROR** `rank` 不支持 event 输入，需先事件聚合 | UNTESTED | §16.2 |
-| EUR | analyst9 | `anl9_sconsensusv2span_*_dataitemvalue` | — | 同上，event 输入 | UNTESTED | §16.2 |
+| EUR | analyst9 | `rank(vec_avg(anl9_sconsensusv2span_cashflowstatement_dataitemvalue))` | 0.49 | 7 个 value 字段全测，最高 0.52（除 cap）；2Y 1.41 差 0.17；28 个字段中 21 个是时间戳/拆股因子非信号 | CLOSED | §16.6 |
 | EUR | other455 | Node2Vec 竞争者聚类标签 168 个 | — | 与 pv30 同类分组字段，预期同 unit 问题 | UNTESTED | §16.1 |
 | CHN | fundamental27 | `rank(fnd27_..._cash_pay_goods_purch_serv_rec_value / ts_mean(...,252))` | −0.82 | 加负号无效（−1.60）；2Y 0.02 FAIL | CLOSED | §16.3 |
 | CHN | fundamental5 | `rank(fnd5_cur_212_21_af_si)`（净利率） | −0.19 | 2Y −1.03 FAIL | CLOSED | §16.3 |
