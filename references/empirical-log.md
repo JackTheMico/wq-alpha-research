@@ -1393,3 +1393,35 @@ CHN 则是 `fundamental27` 315 个（现金流量表科目）+ `fundamental5` 12
 - 两区合计 0 条可提交候选，今日额度仍 0/1
 - 唯一值得下一轮追的是 **EUR event 族**（新闻情绪 + 分析师一致预期），但必须先解决
   event 输入的聚合方式，否则连单腿都跑不起来
+
+### 16.5 event / VECTOR 字段的正确用法（2026-11-08 实测确定）
+
+`nws20` / `analyst9` 的元数据是 `type=VECTOR`，但引擎报的是
+`Operator <op> does not support event inputs`。逐个算子实测结果：
+
+| 包装算子 | 结果 |
+|---|---|
+| `rank(f)` | ERROR not support event inputs |
+| `rank(ts_backfill(f,250))` | 同上 |
+| `rank(ts_mean(f,20))` / `ts_rank` / `ts_count_nans` / `days_from_last_change` | 同上 |
+| **`rank(vec_avg(f))`** | **OK**（EUR qep 单腿 S=0.38、TO 23.6%） |
+| `rank(vec_sum(f))` | OK（S=0.30） |
+| `rank(vec_count(f))` | OK（S=0.09） |
+
+→ **规则：VECTOR/event 字段必须先 `vec_avg` / `vec_sum` / `vec_count` 聚合成标量，
+之后才能进入普通算子链。** 任何 `ts_*` 直接包在原始字段上都会报 event 拒绝。
+
+EUR 新闻情绪族实测（INDUSTRY, d4, TOP2500）：
+
+| 表达式 | S | F | TO |
+|---|---:|---:|---:|
+| `rank(vec_avg(nws20_..._qep))` 正向/负向新闻分 | **0.38** | 0.09 | 23.6% |
+| `rank(vec_sum(nws20_..._qep))` | 0.30 | 0.08 | 18.3% |
+| `rank(ts_mean(vec_avg(nws20_..._qep),20))` | 0.26 | 0.06 | 6.6% |
+| `rank(ts_mean(vec_avg(nws20_..._bam),20))` 新闻情绪 | 0.26 | 0.06 | 7.1% |
+| **`rank(vec_avg(anl9_sconsensusv2span_cashflowstatement_dataitemvalue))`** | **0.49** | 0.21 | 24.4%（2Y 1.41 FAIL） |
+| `0.5 qep + 0.5 bam`（均 20 日平滑） | 0.32 | 0.08 | 7.6% |
+
+→ `news20` 天花板 0.38，判定 **CLOSED**（平滑降 TO 的同时也降 S）。
+`analyst9` 单腿 S=0.49、**2Y=1.41**（距 1.58 仅差 0.17，是本轮唯一接近门槛的指标），
+但 TO 24.4% 偏高、S 仍只有 0.49。该族 25 个字段只测了 1 个，**保持 OPEN，下一轮方向**。

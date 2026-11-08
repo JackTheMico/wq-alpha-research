@@ -122,4 +122,4 @@
 | **日内/微观结构思路必须蒸馏成日频稳定代理**，直接用会死 | 论坛 `post 36223563506839`；本仓 `intraday_pv_feats` 实测 −0.08 |
 | **期权希腊字母类思路在 IND 不可实现**（该区无期权数据集） | §15.1 字段池扫描 |
 | **加负号翻符号不可靠**：同一字段的 `rank(x)` 与 `rank(-x)` / `-rank(x)` 可能**同号同幅**（rank 对 NaN 的填充不对称）。翻方向必须实测，不能靠推导 | §16.3：`anl14` −0.50 / −0.19 / −0.27 三者同号 |
-| **event 类型字段不能直接 `rank`**，需先做事件聚合 | §16.2：EUR `news20` / `analyst9` 报 `Operator rank does not support event inputs` |
+| **VECTOR/event 字段必须先 `vec_avg` / `vec_sum` / `vec_count` 聚合，再进普通算子链**；任何 `ts_*` 直接包原始字段都会被拒 | §16.5：`rank(vec_avg(qep))` OK，其余 6 种包装全 ERROR；EUR 上限 S=0.38 |
