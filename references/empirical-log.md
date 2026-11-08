@@ -1205,3 +1205,10 @@ GLB 剩下三条同族候选（`O0AVoLa1`/`Xg9ep9Q1` 等）不要再提交。
 - 不要把「离线 PnL 按权重相加」当混腿预测器（量纲不同），必须真实仿真；
 - AMR 的 `delay 0` 比 `delay 1` 弱约 0.5–0.7，不要为省延迟换 d0；
 - 提交前额外看 `LOW_ROBUST_UNIVERSE_SHARPE ≥ 1`，它在 `gate_report` 里不阻断。
+
+**补记（2026-11-08）**：昨日同族后备 `LLMr3x3v`（eps 0.15 / d6，S 2.21 / F 1.73 / TO 19.5%，
+全部 IS check PASS）提交 **403**：`SELF_CORRELATION = PROD_CORRELATION = 0.9535 / 0.7`。
+它与已 ACTIVE 的 `RREKPjQ1` 只差 eps 权重（0.15 vs 0.25）与 decay（6 vs 4），同属
+「IND 126 日反转 + EPS 修正」族 ⇒ **族内换权重/decay 对 SELF/PROD 都无效**（再次验证 §10 第 8/16 条）。
+⇒ 同一区域同族的后备候选不要排队提交，额度不会白扣（403 不消耗配额），但纯属浪费 POST。
+IND 想继续出货必须换骨架（非反转主腿，或换 AMR/其他区的新族）。
