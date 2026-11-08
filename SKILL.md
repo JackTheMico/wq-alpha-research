@@ -55,6 +55,8 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
               └── 从输出中按经济学维度选择信号字段
   ├── 拉取所有 alpha 列表 ──→ 只看 ACTIVE；算 **日收益** 相关，>0.7 则修改或放弃
   ├── 设计新因子
+  │    ├── **Step 0.5: 先查结论账本** ──→ python scripts/redflag.py <字段或 dataset>
+  │    │                                命中 CLOSED/BLOCKED（退出码 1）→ 换族，别重烧
   │    ├── 字段已验证？ ──否──→ 查第 2 节（本地字段文件搜索 / 模拟 rank(field)）
   │    └── 是 ──→ 若套模板，先过 4.1.1 数据集一致性门槛
   │               （模板信号字段与用户字段同一 dataset，否则混信号 → 停止执行）
@@ -1869,6 +1871,16 @@ python scripts/evolve_skill.py --max-pnl-fetch 30
 
 完整记录（含原始指标表与推理链）见 `references/empirical-log.md`。
 这里只留**决策级结论**——做判断时看这一页就够，要追溯证据再翻文件。
+
+**运行前先查 `references/ledger.md`（结论账本）**：
+
+```bash
+python scripts/redflag.py <字段关键词>        # 这个字段试过没、结论如何
+python scripts/redflag.py --region IND --open # 该区还有哪些族没关闭
+```
+
+账本按 region × dataset 一行一条，状态 `CLOSED`/`BLOCKED` 命中时退出码为 1。
+散文留在 empirical-log，机器可查的结论只在 ledger——**两份不要混，改结论只改 ledger**。
 
 | 日期 | 实验 | 一句话结论 |
 |---|---|---|
