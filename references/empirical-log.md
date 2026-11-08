@@ -1329,3 +1329,67 @@ IND 想继续出货必须换骨架（非反转主腿，或换 AMR/其他区的�
    换 horizon 不是等价替换，要扩面得回 `predictive_starmine` 的 `revision_count` 族（单腿最高 0.63）。
 6. **AMR 非反转族权重 sweep 没有意义**：单腿最高 0.90，混进去只会拉低 S（§14 的「离线 PnL 相加
    不是预测器」再次成立）。AMR 唯一能出线的仍是 126/252 日反转 + INDUSTRY（封顶 1.39）。
+
+## 十六、2026-11-08 EUR / CHN 首轮：字段池很宽，信号全反，方向翻转不可信
+
+### 16.1 字段池（首次扫描，delay=1）
+
+| 区域 | universe | 全量字段 | 前 500 条内低拥挤（cov≥0.5、cnt<500） |
+|---|---|---:|---:|
+| EUR | TOP2500 | 10000 | 480 |
+| CHN | TOP2000U | 10000 | 486 |
+
+两区都不存在 IND/AMR 那种「只有几十个可用字段」的窄池。EUR 的低拥挤池被两个
+**非同源数据集**占据：`other460` 274 个（财报科目的趋势预测概率/分类标签）、
+`other455` 168 个（Node2Vec 竞争者网络的聚类标签，与 IND `pv30` 同类，预期 unit 问题）。
+CHN 则是 `fundamental27` 315 个（现金流量表科目）+ `fundamental5` 121 个（比率）。
+
+### 16.2 EUR 单腿实测（INDUSTRY, d4, TOP2500）
+
+| 表达式 | S | F | TO | 2Y |
+|---|---:|---:|---:|---|
+| `rank(oth460_3l_caic)` 收入趋势预测概率 | −0.50 | −0.18 | 5.5% | 0.37 FAIL |
+| `rank(oth460_cmin_l1)` 少数股东损益趋势概率 | 0.05 | 0.01 | 4.5% | 0.27 FAIL |
+| `rank(oth460_ciac_class)` 趋势分类标签 | CANCELLED | — | — | — |
+| `rank(fnd28_newq_value_03151q)` 营运资本 | CANCELLED | — | — | — |
+| `rank(nws20_multiple_comp_d1_qep)` 新闻情绪 | **ERROR** `Operator rank does not support event inputs` | — | — | — |
+| `rank(nws20_multiple_comp_d1_bam)` | 同上 ERROR | — | — | — |
+| `rank(anl9_..._cashflowstatement_dataitemvalue)` | 同上 ERROR | — | — | — |
+
+结论：EUR 的「趋势预测概率」族方向为负且 2Y 极差，`_class` 类标签直接 CANCELLED。
+**新闻情绪与分析师一致预期在 EUR 是 event 类型，不能直接 `rank`**，必须先做事件聚合
+（`ts_backfill` 也不够，需要事件算子），这一族本轮未验证。
+
+### 16.3 CHN 单腿 + 翻符号实验（INDUSTRY, d4, TOP2000U）
+
+| 表达式 | S | F | TO | 2Y |
+|---|---:|---:|---:|---|
+| `rank(fnd27_..._cash_pay_goods_purch_serv_rec_value / ts_mean(...,252))` | −0.82 | −0.42 | 5.1% | −0.83 FAIL |
+| 同上加负号 `rank(-...)` | −1.60 | −1.16 | 5.0% | 0.02 FAIL |
+| 同上 `-rank(ts_backfill(...))` | −1.60 | −1.16 | 5.0% | 0.02 FAIL |
+| `rank(fnd5_cur_212_21_af_si)` 净利率 | −0.19 | −0.09 | 6.8% | −1.03 FAIL |
+| `rank(anl14_high_opp_fy2)` | −0.50 | −0.34 | 2.5% | −1.01 FAIL |
+| `rank(-anl14_high_opp_fy2)` | −0.19 | −0.08 | 2.4% | 0.81 FAIL |
+| `-rank(anl14_high_opp_fy2)` | −0.19 | −0.08 | 2.4% | 0.81 FAIL |
+| `rank(ts_backfill(anl14_high_opp_fy2, 250))` | −0.29 | −0.15 | 1.9% | — |
+| 混腿 `0.34purch + 0.33anl14 + 0.33mdl31` | −0.48 | −0.29 | 4.4% | Ladder 0.70 FAIL |
+
+**最重要的发现：加负号不翻符号。** `rank(x)`、`rank(-x)`、`-rank(x)` 三者同号
+（`anl14` 分别 −0.50 / −0.19 / −0.19），而对照组 `-rank(ts_backfill(close,1))` 正常给出
++0.80 —— 说明不是全局现象，而是 **`rank` 对 NaN 的填充不对称**：NaN 股票在
+`rank(x)` 里落在下界、在 `rank(-x)` 里落在上界，负号并不能把它们整体镜像。
+`ts_backfill` 也救不了（−0.27），因为回填改变了信号本身。
+
+→ 由此得两条硬规则（已写进 ledger §3）：
+
+1. **不要靠推导翻方向**。想让一个字段做反向暴露，必须实测翻转版；同号同幅出现的
+   字段直接判定无效。
+2. **event 类型字段（`nws20`、`anl9`）不能直接 `rank`**，需要事件聚合算子先行。
+
+### 16.4 本轮净结果
+
+- EUR：7 条 → 2 条 CANCELLED / 3 条 event ERROR / 2 条跑通但 |S| ≤ 0.50
+- CHN：9 条 → 最高 −1.60（负向），无一条正向可用；混腿 −0.48
+- 两区合计 0 条可提交候选，今日额度仍 0/1
+- 唯一值得下一轮追的是 **EUR event 族**（新闻情绪 + 分析师一致预期），但必须先解决
+  event 输入的聚合方式，否则连单腿都跑不起来
