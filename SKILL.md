@@ -197,6 +197,10 @@ resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
 
 **黄金组合**：`group_rank(ts_rank(signal, N), subindustry)`
 
+> **VECTOR / event 字段（如 EUR 的 `nws20`、`analyst9`）必须先 `vec_avg` / `vec_sum` / `vec_count`
+> 聚合成标量，才能进入普通算子链。** 任何 `ts_*`（含 `ts_backfill`）直接包原始字段都会报
+> `Operator X does not support event inputs`。实测见 empirical-log §16.5。
+
 ---
 
 ## 4. 因子模板库
@@ -576,10 +580,15 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 24. **`PROD_CORRELATION` 是族级判定，不是数值相关性**：换窗口/换 decay/换同族字段名对它几乎没有影响；**唯一有效旋钮是「不同 dataset 的正交腿权重」**（完整 SOP 见 §8.4）。
 25. **同族权重与 prod corr 的映射是凸的**：100%→75% 只降 0.0111，75%→65% 降 0.0355。⇒"混一点点"基本无效，**要到 ≈35% 的正交重量才开始见效**；只在线性区段可近似 −0.03 / 5 个百分点。完整梯度见 §8.4.3。
 26. **降权重会同步打死 `IS_LADDER_SHARPE`，且是断崖式的**：65% 时 2.07/2.02 PASS，60% 时 1.56/1.58 FAIL，而 Sharpe 只从 1.78 掉到 1.76。⇒ prod corr 与 ladder 的可行交集很窄，别指望一路压权重压到过线（§8.4.4）。
-27. **正交腿的 `ts_rank` 窗口越长，prod corr 越低、Sharpe 反而略升**：60/126/252 → 0.7232/0.7184/0.7155（S 1.82/1.73/1.80）。慢变量更能与高频价格结构脱钩——这是免费的一刀。
-28. **跨族腿不要求单腿强**：20 条跨族候选里只有 2 条单腿 FULL S > 1.0，其余 0.3–0.7，但当混腿素材完全够用。**反过来，强腿不一定能混**：`model250` 的 ML 综合分（单腿 0.46）混进 4 腿骨架把 Sharpe 从 1.78 砸到 0.72。
-29. **成功提交的 POST 次数是失败的 20–80 倍**：FAIL 通常 1–3 次 POST 就给 403；成功要 40–80 次 200 才转 `ACTIVE`。`max_posts ≥ 60`，且循环内每 5–10 次查一次 `GET /alphas/{id}`，见 `ACTIVE` 立刻收工（§7.7.2 坑五）。
-30. **PASS 之后永远读不到 prod corr 的数值**：判定书只在 FAIL 时回传数字，ACTIVE 上 `is.prodCorrelation` 恒 0.0。报告里只能写"已过线"，不能写具体值（§7.7.2 坑四）。
+27. **可提交性由「长周期检查」决定，不是 Sharpe**：IND 惊喜族 `group_rank` 后 S=1.69（已过 1.58）却同时挂 `LOW_2Y` 0.80 和 `LOW_ROBUST` 0.73；8 组权重 × decay × 中性化扫完后 ladder 最高只有 1.32。**单腿 S 过线 ≠ 能交，先看 2Y / Robust / Ladder 的最小值**（§15.3）。
+28. **VECTOR / event 字段必须先 `vec_avg` 聚合**：7 种包装实测，`rank` / `ts_backfill` / `ts_mean` / `ts_rank` / `ts_count_nans` / `days_from_last_change` 全被拒，只有 `vec_avg` / `vec_sum` / `vec_count` 可用（§16.5）。
+29. **加负号不翻方向**：同一字段 `rank(x)`、`rank(-x)`、`-rank(x)` 可能同号同幅（EUR `anl14`：−0.50 / −0.19 / −0.19），而 `-rank(backfill(close))` 正常给 +0.80。根因是 `rank` 对 NaN 的填充不对称。**反向暴露必须实测，不能推导**（§16.3）。
+30. **PCA / 聚类分组字段不能当 group 用**：IND `pv30` 41 个字段全是 PCA/聚类成员标签，`group_rank` 报 `expected Unit[Group:1], found Unit[]`，`densify` 也无效；`bucket` 强转后 ladder 从 1.07 掉到 0.63。字段列表里出现 ≠ 该区域可用（§15.6）。
+31. **基本面「绝对水平」族的瓶颈是信息量，不是量纲**：AMR fundamental28 13 条单腿最高 0.51，EUR analyst9 7 条最高 0.49；把金额除以 `cap` 只从 0.49 抬到 0.52。别指望归一化能救弱信号（§16.6）。
+32. **正交腿的 `ts_rank` 窗口越长，prod corr 越低、Sharpe 反而略升**：60/126/252 → 0.7232/0.7184/0.7155（S 1.82/1.73/1.80）。慢变量更能与高频价格结构脱钩——这是免费的一刀。
+33. **跨族腿不要求单腿强**：20 条跨族候选里只有 2 条单腿 FULL S > 1.0，其余 0.3–0.7，但当混腿素材完全够用。**反过来，强腿不一定能混**：`model250` 的 ML 综合分（单腿 0.46）混进 4 腿骨架把 Sharpe 从 1.78 砸到 0.72。
+34. **成功提交的 POST 次数是失败的 20–80 倍**：FAIL 通常 1–3 次 POST 就给 403；成功要 40–80 次 200 才转 `ACTIVE`。`max_posts ≥ 60`，且循环内每 5–10 次查一次 `GET /alphas/{id}`，见 `ACTIVE` 立刻收工（§7.7.2 坑五）。
+35. **PASS 之后永远读不到 prod corr 的数值**：判定书只在 FAIL 时回传数字，ACTIVE 上 `is.prodCorrelation` 恒 0.0。报告里只能写"已过线"，不能写具体值（§7.7.2 坑四）。
 
 ---
 
