@@ -1212,3 +1212,117 @@ GLB 剩下三条同族候选（`O0AVoLa1`/`Xg9ep9Q1` 等）不要再提交。
 「IND 126 日反转 + EPS 修正」族 ⇒ **族内换权重/decay 对 SELF/PROD 都无效**（再次验证 §10 第 8/16 条）。
 ⇒ 同一区域同族的后备候选不要排队提交，额度不会白扣（403 不消耗配额），但纯属浪费 POST。
 IND 想继续出货必须换骨架（非反转主腿，或换 AMR/其他区的新族）。
+
+---
+
+## 十五、2026-11-08 换族扫描：IND 非反转主腿 / AMR 新族全部撞死在 ladder+2Y
+
+按 §8.4.2 SOP 走完「扫全字段 → 单腿 FULL → 权重 sweep」，共提交 114 条 FULL、
+成功出结果 106 条（8 条因字段在该区不存在被 CANCELLED），**0 条可提交**。
+设置统一：`delay 1 / neutralization INDUSTRY / decay 4 / truncation 0.08 / FULL`
+（IND `universe=TOP500`，AMR `universe=TOP600`）。
+
+### 15.1 字段池规模（`type=MATRIX`，`order=alphaCount` 翻页 1000 条后本地过滤）
+
+| 区域 | MATRIX 总数 | `coverage≥0.5 且 alphaCount<500` | 主要 dataset（字段数） |
+|---|---:|---:|---|
+| IND/TOP500 | 1000 | 877 | analyst_revision_horizons 287、predictive_starmine 194、mmp_nlp_sentiment 154、intraday_pv_feats 146、pv30 39、ai_news_scores 35、model28 9、fundamental89 6 |
+| AMR/TOP600 | 1000 | 977 | fundamental28 722、fundamental23 65、analyst4 55、fundamental6 41、analyst11 28、model31 13、model38 12、model25 10、model26 6、model30 6、model16 3、model50 3、model28 3 |
+
+> ⚠️ **`GET /data-fields` 的 `dataset_id=` 参数不生效**（传了返回空），必须翻页后在本地按
+> `(f["dataset"] or {}).get("id")` 过滤。另外 `f.get("alphaCount") or 9999` 会把 0 当成缺失，
+> 写成 `9999 if f.get("alphaCount") is None else f.get("alphaCount")`。
+> 翻页时 `limit` 上限 50，`offset` 到 950 为止；前 500 条会把 IND 的 ai_news_scores 从 35 个截成 5 个。
+
+### 15.2 IND 非反转单腿实测（`rank(field)`，INDUSTRY）
+
+| 字段 | dataset | S | F | TO | 结论 |
+|---|---|---:|---:|---:|---|
+| `forecasted_earnings_surprise_fy1_long` | analyst_revision_horizons | **1.35** | 0.94 | 4.9% | 本轮最强非反转腿 |
+| `mean_estimate_change_pct_fy1_earnings_7d_3`（20 日均） | predictive_starmine | 1.18 / 1.02（原值） | 0.76 | 8.5% | 次强 |
+| `projected_earnings_fy5_3 / close` | predictive_starmine | 0.62 | 0.31 | 2.9% | 弱 |
+| `analyst_upward_revision_count_fy1_earnings_14d_3` | predictive_starmine | 0.63 | 0.29 | 12.0% | 弱 |
+| `peg_ratio_industry_percentile_f12m_long_term`（反向） | analyst_revision_horizons | 0.69 | 0.44 | 3.2% | 弱 |
+| `price_to_mean_estimate_fy1_earnings_long_term_2`（反向） | analyst_revision_horizons | 0.49 | 0.28 | 2.6% | 弱 |
+| `price_to_estimate_ratio_next_12m_operating_long`（反向） | analyst_revision_horizons | 0.53 | 0.33 | 2.3% | 弱 |
+| `neutral/positive/negative_score_*`（ai_news_scores，35 个） | ai_news_scores | 0.27 / 0.18 | ≤0.09 | 9% | 全废 |
+| `mean_slippage_60m_pre_close_2` / `mean_bid_price_interval` 比值 | intraday_pv_feats | −0.08 / −0.14 | — | 7–18% | 全废 |
+| `mdl28_sm_structural_*_pd_percent`（反向） | model28 | 0.02 | 0.00 | 2.5% | 全废 |
+| `resource_efficiency_subsector_rank` | analyst11 | 0.22 | 0.07 | 25% | 全废 |
+| `growth_next_vs_this_year_earnings_weighted_long_4` | analyst_revision_horizons | **−0.44** | −0.16 | 14% | 方向为负，成长族反向 |
+
+⇒ **IND 非反转可用池只有「盈利惊喜 + 一致预期修正」两张牌**，其余（情绪、日内微结构、违约概率、ESG）单腿全部 ≤0.27。
+
+### 15.3 IND 惊喜族的天花板：S 够，ladder/2Y 不够
+
+单腿 `group_rank(field, industry)`（比 `rank` 高 0.3–0.4）：
+
+| 表达式 | S | F | IS_LADDER | LOW_2Y | LowRobust |
+|---|---|---:|---|---|---|
+| `group_rank(surprise_fy1_long, industry)` | **1.69** | 1.33 | 不出现在 checks | **WARNING 0.80** | FAIL 0.73 |
+| 同上 decay 10 / 20 / 30 | 1.66 / 1.62 / 1.60 | 1.30/1.26/1.25 | — | 0.79 / 0.82 / 0.86 | 0.72/0.72/0.75 |
+| `group_rank(ts_mean(surprise,20), industry)` | 1.61 | 1.24 | — | 0.91（最好） | 0.71 |
+| `group_rank(surprise, subindustry)` | 1.48 | 1.07 | — | 0.60 | 0.78 |
+
+混腿（surprise : rev_up，全部 INDUSTRY/d4 除非标注）：
+
+| 权重 | S | F | IS_LADDER | LowRobust |
+|---|---:|---:|---|---|
+| 0.8 : 0.2 | 1.79 | 1.47 | WARNING 0.97 | FAIL 0.77 |
+| **0.7 : 0.3** | **1.83** | **1.54** | WARNING 1.07 | FAIL 0.77 |
+| 0.6 : 0.4 | 1.86 | 1.59 | WARNING 1.15 | FAIL 0.73 |
+| 0.7 : 0.3，SUBINDUSTRY | 1.63 | 1.23 | **WARNING 1.32（最高）** | FAIL 0.68 |
+| 0.7 : 0.3，d10 / d20 / d40 | 1.79 / 1.72 / 1.66 | 1.49/1.41/1.35 | 1.03 / 1.00 / 0.98 | 0.73/0.71/0.76 |
+| 0.6 : 0.4，d20 | 1.76 | 1.47 | WARNING 1.09 | FAIL 0.69 |
+| 0.5 : 0.5（配 20 日均 EM） | 1.57 | 1.21 | WARNING 1.30 | FAIL 0.61 |
+
+读法（与 §8.4.4 同构，但换了约束面）：
+
+- **纯单腿时平台只跑 `LOW_2Y_SHARPE`，混腿时只跑 `IS_LADDER_SHARPE`** —— 这两项在同一批 results 里互斥出现，所以两条路径各有各的墙。
+- **S 与 ladder 反向**：正交腿权重从 0.2 加到 0.4，S 从 1.79 升到 1.86，ladder 从 0.97 升到 1.15；但**即使最好一格也只有 1.32/1.58**，压权重到 0.5 反而把 S 打到 1.57（低于顾问线）。
+- **decay 20/40 对 ladder 无效**（1.00/0.98），因为 ladder 问的是「分年度子样本一致性」，不是平滑度。
+- **SUBINDUSTRY 是 ladder 最高的一格（1.32）但 S 掉 0.2**，与 §14 的「IND 用 INDUSTRY」结论方向相反——只在 ladder 口径下成立，S 口径下仍是 INDUSTRY 优。
+- 结论：**IND 惊喜族的可行域为空**（ladder ≥1.58 与 S ≥1.58 无交集），与 §8.4.4「65% 是唯一可行窗口」是同一种结构，区别是这次正交腿本身不够强，连窗口都不存在。
+
+### 15.4 AMR 全池实测：天花板 0.90
+
+| dataset | 最好字段 | S | 备注 |
+|---|---|---:|---|
+| model30 | `group_rank(star_eps_surprise_prediction_fy1, industry)` | **0.90** | 单 `rank` 0.76；`LOW_2Y` 1.48（最接近门槛但仍 FAIL） |
+| model30 | `star_eps_surprise_prediction_fq2` | 0.51 | SubU PASS 0.58 |
+| fundamental28 | `fnd28_value_08221`（Total Debt % Total Capital） | 0.51 | 2Y 0.35；其余 ratio 全 ≤0.32 |
+| fundamental28 | 毛利率 −0.45、营业利润率 −0.20、quick −0.02、current 0.02、利息保障 −0.09、EPS 增长 0.09、净利增长 0.14 | ≤0.14 | **13 个 ratio 全部 2Y FAIL** |
+| analyst4 | `anl4_qfv4_median_eps / close` | 0.31（ts_rank252 0.43） | SubU 全部 ≤0.3 |
+| analyst4 | `anl4_qfv4_eps_flag`（revision/new 标志位） | 0.32 | TO 7.3%、2Y −0.11 |
+| analyst4 | `0.6·eps/close + 0.4·eps_flag` | 0.42 | 混腿最好的一条，仍远低于门槛 |
+| model31 | `mdl31_a1_*`（erq/acc/oe/pb/cf） | 全部 ≤0.05 或负 | §14 记的 roe 0.44 本次未复测；`fnd28_prof_value_08371`（ROE per share）实测 0.27 |
+| model28 | `star_cr_region_rank` / `star_cr_dist_to_default`（反向） | 0.05 / −0.06 | 违约风险族在 AMR 无信号 |
+| model50 | `mdl50_bk_fund_stab`（反向） | 0.01 | 基本面稳定性族无信号 |
+| fundamental23 | 未单独实测（65 字段，与 fundamental28 同类切面） | — | 本轮判定同族不必再烧 |
+
+**混腿互毁**：`0.6·debt_cap + 0.4·fscore_momentum` → **S = −0.46**（两者方向相反）；
+`ts_rank(debt_cap,252)` → −0.12，`ts_rank(...,126)` → 0.25，拉长窗口继续掉。
+
+⇒ **AMR 除反转骨架外全族无效**：972 个低拥挤字段扫下来，非反转单腿天花板 0.90，
+且 `LOW_2Y_SHARPE` 全线 FAIL（最好 1.48 / 1.58）。AMR 到此彻底关闭。
+
+### 15.5 新增规则
+
+1. **`LOW_2Y_SHARPE` 与 `IS_LADDER_SHARPE` 在同一批仿真里互斥出现**：单腿（含 `group_rank` 单腿）
+   只出 2Y，混腿只出 ladder。所以「单腿 S 很高但 2Y 挂」和「混腿 S 够但 ladder 挂」是同一族的两面，
+   不要以为换写法能绕开——它们问的都是跨年度一致性。
+2. **`group_rank(field, industry)` 比 `rank(field)` 在 IND 高 0.3–0.4**（1.35→1.69、1.02→1.49），
+   但当 S 过 1.58 后 2Y 反而更差（0.94→0.80）。**加中性化能抬 S，不能抬 2Y**。
+3. **AMR 的 `fundamental28`（722 个 `alphaCount=0`、`coverage=0.50`）是「零拥挤、零信号」**，
+   财报比率静态值在该区没有 alpha；`coverage` 恰好 0.50 说明只有一半股票有值，作者可能是
+   用了不同的财报口径对齐，导致截面排序被数据缺失结构污染。
+4. **字段名出现在 `/data-fields` 列表 ≠ 该区可用**：`forecasted_earnings_surprise_fy2_long`
+   （非 `_pct_` 版）在 IND 仿真直接 `unknown variable`，而同族的
+   `forecasted_earnings_surprise_pct_fy2_long`、`anticipated_earnings_surprise_q1_short` 可用。
+   列表是按 dataset 全局返回的，区域切片不可见 ⇒ **单腿验证仍是必需的**。
+   多仿真批次里一条 ERROR 会 **CANCELLED 同组其它 payload**，所以新字段先 `batch_size=1/2` 试。
+5. **IND 的 surprise 族里只有 FY1 long 有信号**：`_pct_fy2_long` −0.04、`_q1_short` 0.12、
+   `_pct_fy1_short` 0.21，而 `forecasted_earnings_surprise_fy1_long` 1.35 —— 同一 dataset 内
+   换 horizon 不是等价替换，要扩面得回 `predictive_starmine` 的 `revision_count` 族（单腿最高 0.63）。
+6. **AMR 非反转族权重 sweep 没有意义**：单腿最高 0.90，混进去只会拉低 S（§14 的「离线 PnL 相加
+   不是预测器」再次成立）。AMR 唯一能出线的仍是 126/252 日反转 + INDUSTRY（封顶 1.39）。
