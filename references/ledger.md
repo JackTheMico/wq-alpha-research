@@ -41,6 +41,10 @@
 | AMR | model31（Earnings Quality） | **CLOSED** | 0.05 | 与 §14 复测一致，全负或零 | §15.4 |
 | AMR | model28 / model50 / model16 | **CLOSED** | 0.05 / 0.01 / — | 违约风险、基本面稳定性无信号 | §15.4 |
 | AMR | fundamental6 / analyst11 / model25 / model26 / model38 | **UNTESTED** | — | 非反转族，同 AMR 非反转上限 0.90 预期 | §15.4 |
+| GLB | model109 慢变量（FCF/EV 20v250 正交） | **CLOSED** | 1.03 | AMER 0.68 单腿不足；2Y 2.25、TO 2.8% 很好 | §17 |
+| GLB | pv1 reversal（SUBINDUSTRY） | **BLOCKED** | 1.88 | AMER 1.01、2Y 1.08（ATOM 需 2Y）、PP corr 0.9673 | §17 |
+| GLB | model109 FCF/EV + pv1 REV252 | **OPEN** | 1.65 | AMER 1.01 / EMEA 1.40 / APAC 1.20 / Ladder PASS；Fitness 0.80、PP corr 未知 | §17 |
+| GLB | analyst15 / model26 / model38 / model77 慢字段 | **CLOSED** | ≤0.43 | 单字段与模板形态在 AMER 均 <0.26 | §17 |
 
 ---
 
@@ -123,3 +127,77 @@
 | **期权希腊字母类思路在 IND 不可实现**（该区无期权数据集） | §15.1 字段池扫描 |
 | **加负号翻符号不可靠**：同一字段的 `rank(x)` 与 `rank(-x)` / `-rank(x)` 可能**同号同幅**（rank 对 NaN 的填充不对称）。翻方向必须实测，不能靠推导 | §16.3：`anl14` −0.50 / −0.19 / −0.27 三者同号 |
 | **VECTOR/event 字段必须先 `vec_avg` / `vec_sum` / `vec_count` 聚合，再进普通算子链**；任何 `ts_*` 直接包原始字段都会被拒 | §16.5：`rank(vec_avg(qep))` OK，其余 6 种包装全 ERROR；EUR 上限 S=0.38 |
+
+---
+
+## 4. GLB / Power Pool Nov'26（2026-11-11 实测，§17）
+
+> 主题：GLB/D1 Power Pool Nov'26（2026-10-26 ~ 11-22），条件 = GLB · D1 · AMER Sharpe > 1。
+> 统一设置：TOP3000 / delay 1 / decay 4 / truncation 0.08 / MARKET，表达式内 `group_neutralize(..., country)`。
+> 结论是“GLB AMER 由反转腿驱动，慢变量单数据集过不了 AMER”。
+
+| 类型 | 表达式（摘要） | S | AMER | EMEA | APAC | TO | 卡点 |
+|---|---|---|---|---|---|---|---|
+| ATOM 模板（model109 FCF/EV） | `group_neutralize(vector_neut(ts_mean(ts_backfill(FCF_EV,60),20), ts_mean(ts_backfill(FCF_EV,60),250)), country)` | 1.03 | 0.68 | 1.05 | 0.33 | 2.8% | AMER 不足；2Y 2.25 很好 |
+| ATOM 模板（model38 StarMine 慢字段） | 同上，F = `backfill_forward_10yr_eps_growth` 等 | ≤0.38 | ≤0.18 | — | — | 1–3% | 慢字段信号几乎为 0 |
+| ATOM 反转 | `group_rank(-ts_rank(returns,126), subindustry)`，decay 20 | 1.67 | 1.04 | 0.14 | 1.70 | 45% | 2Y 0.72；PP corr 0.9673 |
+| ATOM 反转（252） | `group_rank(-ts_rank(returns,252), subindustry)`，decay 10 | 1.88 | 1.01 | 0.26 | 1.96 | 61% | 2Y 1.08；PP corr 高 |
+| 纯 PP 候选 A | `group_neutralize(0.7*rank(ts_delta(FCF_EV,126)) + 0.3*rank(-ts_rank(returns,252)), country)` | 1.62 | **1.06** | 1.13 | 1.21 | 18% | Fitness 0.84 / Ladder 1.40；PP corr 未测 |
+| 纯 PP 候选 B（更稳） | `group_neutralize(0.6*rank(vector_neut(ts_mean(ts_backfill(FCF_EV,60),20), ts_mean(ts_backfill(FCF_EV,60),250))) + 0.4*rank(-ts_rank(returns,252)), country)` | 1.65 | 1.01 | 1.40 | 1.20 | 25% | Fitness 0.80；Ladder PASS |
+
+- `ts_median` 在本账号不可用（`Inaccessible or unknown operator`），模板需改 `ts_mean`；`ts_backfill` 仍不计入 8 算子限制。
+- 未打 `POWER_POOL` tag 时 `MATCHES_THEMES` 恒为 WARNING/PENDING，即使 AMER 1.06；主题匹配需要在提交前打 tag 才能验证。
+- ATOM 路径要求 2Y Sharpe，本区单数据集候选 2Y 最高 1.51（`rev21`，AMER 0.91）→ 单数据集 GLB ATOM 在本批字段池内不可行。
+- **2026-11-11 提交实测**：`O0AVoLa1`（MINVOL10M / COUNTRY / d4 / S 2.31 / F 1.37 / TO 25.0%，三子区全 PASS）打 `POWER_POOL` tag + 1128 字符 description 后提交，403 = **`PROD_CORRELATION=0.8698(limit=0.7)`**，其余全 PASS。`MATCHES_THEMES` 在 PATCH tag 后仍是 WARNING（checks 是仿真快照，不随 PATCH 重算）⇒ **打 tag 并未把该族切到 PP 相关性闸门**；MINVOL10M 同族 prod 0.8698 高于 TOP3000 的 0.7903。
+
+### 4.1 低拥挤族 + 价格结构变体（2026-11-11 夜间，GLB D1 TOP3000）
+
+**低拥挤慢变量族**（按 `data-sets` 的 alphaCount 从低到高扫了 138 个 GLB 数据集，选 cov≥0.5 的族）：
+
+| 数据集（alphaCount） | 单腿最佳 | AMER | 结论 |
+|---|---|---|---|
+| model16 Fundamental Scores（56） | `-analyst_revision_rank_derivative` 翻转 S 0.62 | 0.57 | CLOSED |
+| model28 Structural Credit Risk（29） | `default_probability_one_year_pct` 反向 S 0.24 | 0.60 | CLOSED |
+| model36 SmartRatios（48） | `-credit_risk_leverage_score_main` S 0.28 | 0.51 | CLOSED |
+| model37 Text Mining（21） | `-credit_risk_global_percentile_score_float_5` S 0.24 | 0.49 | CLOSED |
+| model50 International Scorings（25） | `+dispersion` / `+beta` / `+downside` 翻转后 S≈0.47–0.68 | 0.68 | CLOSED |
+| model140 Inflation Sensitivity（1） | `mdl140_qes_sinc_comp` S 0.54 | 0.56 | CLOSED |
+| analyst82 EPS Prediction（35） | `anl82_delta_epsq_q1_predict` S 0.17 | -0.10 | CLOSED |
+
+- 3 腿组合 6 条（model50 rev+disp+beta / rev+beta+model140 / rev+model36 / rev+model37 / rev+model28 / model16 两腿+model140）：**S 0.23–0.44**，T1–T5 的 AMER/EMEA 直接 ERROR（子区样本不足），T6 AMER 0.13。
+- 低覆盖数据集（other546/567、search_interest、hiring_trends、other699、model239、analyst45、news73、finnews_nlp_scores、other384、option_chart_model、model307、fundamental22/25）在 GLB TOP3000 的 coverage 全 <0.5，无法用。
+
+**价格结构变体**（decay 10 / SUBINDUSTRY）：
+
+| 表达式 | S | F | TO | AMER | 2Y | id |
+|---|---|---|---|---|---|---|
+| 残差反转 21d `-ts_rank(returns - group_mean(returns,1,country),21)` | 1.68 | 0.59 | 60% | 0.80 | 1.13 | A1xjOWGg |
+| 日内反转 21d `-ts_rank(close/vwap-1,21)` | 1.19 | 0.45 | 57% | 0.59 | 0.71 | vRAwe5Vz |
+| 隔夜反转 `-ts_rank(open/ts_delay(close,1)-1,21)` | 0.41 | 0.09 | 57% | -0.13 | 0.28 | O0WQWpjJ |
+| 量价条件反转 `-ts_rank(returns,21)*ts_rank(volume/adv20,21)` | 1.28 | 0.50 | 46% | 0.73 | 1.77 | 9qlZGzNd |
+| 低波 `-ts_rank(ts_std_dev(returns,60),252)` | 0.12 | 0.03 | 8% | -0.33 | -0.28 | ZYaPXALj |
+| 区间反转 `-ts_rank((high-low)/close,21)` | -0.34 | -0.07 | 48% | -0.07 | 0.25 | YPaLlYXA |
+| **残差反转 126d** 同上窗口 126 | **1.92** | 0.76 | 59% | **1.07** | 1.15 | E5QONjVP |
+| 日内反转 126d | 未跑（后台被中止） | — | — | — | — | UNTESTED |
+
+- `E5QONjVP` 三子区 PASS（AMER 1.07 / EMEA 1.36 / APAC 1.52），打 `POWER_POOL` tag 后提交，403 = **`LOW_FITNESS=0.76` + `PROD_CORRELATION=0.8789` + `LOW_2Y_SHARPE=1.15`**。
+- **GLB D1 结构性结论**：唯一能过 AMER>1 的两个族（裸反转 252d、残差反转 126d）prod corr 均在 0.87–0.88；所有慢变量族 AMER ≤0.68。调窗口/中性化/组合都无法同时满足 AMER>1 与 corr<0.7。
+- 算子坑：`ts_median` / `ts_skewness` / `ts_max` 本账号不可用；`group_mean` 必须 3 参 `(x, weight, group)`；同一 `run_many` 批次内一条 ERROR 会把同批其他任务标 CANCELLED，筛选时应逐条提交或小批。
+
+## 5. EUR D1（2026-11-11 实测，TOP2500 / decay 10 / SUBINDUSTRY）
+
+> 当前 Power Pool 主题是 GLB D1，EUR 候选 `MATCHES_THEMES` 恒为 WARNING，只能走 ATOM/Regular。
+
+| 表达式 | S | F | TO | 2Y | SubU | 结论 |
+|---|---|---|---|---|---|---|
+| 残差反转 126d `group_rank(-ts_rank(returns-group_mean(returns,1,country),126),subindustry)` | 2.00 | 0.79 | 62% | 0.76 | 1.31 | 可看，Fitness/2Y 不足 |
+| 裸反转 252d `group_rank(-ts_rank(returns,252),subindustry)` | 2.07 | 0.83 | 63% | 1.06 | 1.46 | 最优，仍需降 TO |
+| 裸反转 21d | 1.44 | 0.44 | 63% | 0.84 | 1.19 | 换手过高 |
+| FCF/EV `ts_backfill(fnd23_ofc/cap,60)` | 0.09 | 0.02 | 1.9% | — | 0.59 | 无效 |
+| model16 `-analyst_revision_rank_derivative` | -0.19 | -0.05 | 0.8% | 0.01 | -0.13 | 无效 |
+| model50 `-analyst_forecast_revision_score_4` | -0.40 | -0.15 | 1.3% | -0.26 | -0.34 | 无效 |
+| model50 `+analyst_forecast_dispersion_score` | 0.44 | 0.17 | 1.2% | 0.28 | 0.37 | 无效 |
+| model37 `-credit_risk_global_percentile_score_float_5` | -0.61 | -0.25 | 2.2% | -0.52 | -0.41 | 无效 |
+
+- EUR 与 GLB 同构：只有价格反转族有效，慢变量族更弱；EUR 反转候选 Fitness 0.79–0.83（TO 62%），需 decay 30–40 压换手后再测，且 prod corr 未知。
+- 未继续执行（用户选择归档）：EUR decay 40 变体、EUR 提交测相关、USA D1 方向。
