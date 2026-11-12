@@ -45,6 +45,21 @@
 | ASI/JPN/HKG/TWN/KOR | Investability Sharpe：`maxtrade=ON`，或 `investability Sharpe > 原 Sharpe × 0.7` |
 | SuperAlpha | 门槛同 alpha，但 turnover 改为 **2% ≤ TO < 40%** |
 
+#### 5.1.1.1 质量闸门：平台线 ≠ 值得交（Fitness ≥ 2.0 / Margin ≥ 10‱）
+
+平台 `LOW_FITNESS` 的 limit 只有 1.0，但**「能提交」不代表「该提交」**。质量差的因子交多了会把 Value Factor 打到 0.10 量级，之后交再多也救不回来——「为了交而交」是新手最贵的错误。因此本地在平台线之上再卡一道质量线（`wq_api.QUALITY_*`，`gate_report` / `preflight` 默认开启）：
+
+| 指标 | 质量线 | 说明 |
+|------|--------|------|
+| **Fitness** | **≥ 2.0**（2.5+ 才算好的 regular alpha） | 主排序指标；低于 2.0 直接阻断，不再看 Sharpe |
+| **Margin** | **≥ 10‱（0.001）**，30‱+ 更佳 | 低于 10‱ 收益盖不住手续费，交上去是负贡献 |
+| Returns / Drawdown | DD ≤ Returns | 回撤大于收益的 PnL 形态直接阻断 |
+| PnL 平滑度 / 逐年稳定性 | 人工复核 | 逐年 Sharpe/Fitness 不应有明显断层（记录集 `yearly-stats` 可查） |
+
+- 只重点看 **Fitness、Margin、Returns、Drawdown**，其余指标不必纠结。
+- `preflight.py` 的渲染会打印 `质量线: Fitness ≥ 2.0  Margin ≥ 10‱`，NO-GO 时先看是不是这一项。
+- 复盘对照或确有必要时，可传 `quality=False`（分别对应 `gate_report(..., quality=False)` / `preflight.evaluate(..., quality=False)`）。
+
 #### 5.1.2 Power Pool Alphas（低 Sharpe 通道，Sharpe ≥ 1.0 即可）
 
 来源：`GET /tutorial-pages/alpha-submission`（lastModified 2026-09-18）「Power Pool Alphas」章节。**这是顾问账号上 Sharpe 门槛最低的一条路径**，四类条件必须同时满足：

@@ -13,7 +13,8 @@
 复核内容包括：
   1. 当日提交配额
   2. status 必须是 UNSUBMITTED（避免重复提交）
-  3. gate_report 全部通过
+  3. gate_report 全部通过 —— 含**质量闸门**：Fitness ≥ 2.0、Margin ≥ 10‱、
+     Drawdown ≤ Returns（平台 Fitness 1.0 只是"允许交"，低质量会拉低 Value Factor）
   4. 打印 SELF/PROD/POWER_POOL 相关性的当前值（提交前通常为 PENDING）
 """
 from __future__ import annotations

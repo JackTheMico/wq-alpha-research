@@ -39,7 +39,15 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from wq_api import BrainError, BrainSession, field_availability  # noqa: E402
+from wq_api import (  # noqa: E402
+    QUALITY_FITNESS_MIN,
+    QUALITY_MARGIN_MIN,
+    BrainError,
+    BrainSession,
+    field_availability,
+    quality_blockers,
+    quality_notes,
+)
 from static_check import BASE_PRICE_FIELDS, extract_signal_fields  # noqa: E402
 
 # 拥挤度先验：用 alphaCount 近似 PROD_CORRELATION 风险。
@@ -82,13 +90,16 @@ def evaluate(
     *,
     strict: bool = True,
     crowding: Optional[dict] = None,
+    quality: bool = True,
 ) -> dict:
     """纯函数判定：给定 alpha 与阈值，返回 GO / NO-GO 及全部理由。
 
     与 `BrainSession.gate_report` 的差别：
       * ladder 类检查即使在 `is.checks` 里是 WARNING，只要 value < limit 就算阻断；
       * 把阻断（blockers）与提示（warnings）分开，前者一票否决；
-      * 把拥挤度先验并入结论（`PROD_CORRELATION` 唯一可用的本地代理）。
+      * 把拥挤度先验并入结论（`PROD_CORRELATION` 唯一可用的本地代理）；
+      * 质量闸门（默认开启）：Fitness < 2.0 或 Margin < 10‱ 一票否决——
+        与平台「允许提交」线（Fitness 1.0）不是一回事，低质量提交会拉低 VF。
     """
     is_ = alpha.get("is") or {}
     settings = alpha.get("settings") or {}
@@ -115,6 +126,11 @@ def evaluate(
         lo, hi = thresholds["turnover"]
         if not lo <= turnover <= hi:
             blockers.append(f"Turnover {turnover:.2%} 不在 [{lo:.0%}, {hi:.0%}]")
+
+    # 质量闸门（质量 > 数量）：Fitness / Margin / PnL 形态
+    if quality:
+        blockers.extend(quality_blockers(is_))
+        warnings.extend(quality_notes(is_))
 
     # ladder 类：WARNING 不可采信
     ladder: dict[str, dict] = {}
@@ -207,12 +223,18 @@ def render(result: dict) -> str:
     def pct(x: Optional[float]) -> str:
         return f"{x * 100:.2f}%" if x is not None else "—"
 
+    def bps(x: Optional[float]) -> str:
+        """Margin 用万分比（‱）显示：0.0015 → 15.0‱。"""
+        return f"{x * 10000:.1f}‱" if x is not None else "—"
+
     lines = [
         f"{'=' * 68}",
         f"{result['alpha_id']}  {result['region']}/{result['universe']} "
         f"delay={result['delay']} decay={result['decay']} {result['neutralization']}",
         f"  Sharpe {m['sharpe']:.2f}  Fitness {m['fitness']:.2f}  TO {pct(m['turnover'])}  "
-        f"Ret {pct(m['returns'])}  DD {pct(m['drawdown'])}" if m["sharpe"] is not None else "",
+        f"Ret {pct(m['returns'])}  DD {pct(m['drawdown'])}  Margin {bps(m['margin'])}"
+        if m["sharpe"] is not None else "",
+        f"  质量线: Fitness ≥ {QUALITY_FITNESS_MIN:.1f}  Margin ≥ {QUALITY_MARGIN_MIN * 10000:.0f}‱",
     ]
     for name, info in result["ladder"].items():
         lines.append(

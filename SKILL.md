@@ -347,7 +347,7 @@ resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
    只有 2 条单腿 S > 1.0（`pattern_scores` 的 `breakaway_gap_up_*`，S=1.11 / 1.05），
    其余多在 0.3–0.7，直接当独立 alpha 都是废的——但作为混腿素材完全够用。
 3. **权重 sweep**：正交腿从 25% 起，按 5% 递增（25/30/35/40），价格腿按比例压缩。
-4. **双筛**：`IS_LADDER_SHARPE` 的 value ≥ limit **且** gate（S>1.58 / F>1.0 / TO 1–70%）同时 PASS 才进提交池。
+4. **双筛**：`IS_LADDER_SHARPE` 的 value ≥ limit **且** gate（S>1.58 / F>2.0 / Margin≥10‱ / TO 1–70%）同时 PASS 才进提交池。
 5. **按"预期 prod corr 最低"的顺序依次提交**，用 FAIL 数值当前进进度条。
 
 #### 8.4.3 实测权重梯度（同一骨架，只动权重与正交腿窗口）
@@ -504,6 +504,7 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 | 项 | 口径 |
 |---|---|
 | Sharpe / Fitness / Turnover | 按账号权限取阈值（顾问 D1 为 1.58 / 1.0 / 1%–70%） |
+| **质量闸门（默认开启）** | **Fitness ≥ 2.0 且 Margin ≥ 10‱**；DD > Returns 也阻断。平台线只是"允许交"，低质量提交会拉低 Value Factor |
 | `IS_LADDER_SHARPE` / `LOW_2Y_SHARPE` | **WARNING 且 value < limit ⇒ 阻断**（不信 WARNING） |
 | `LOW_SUB_UNIVERSE_SHARPE` / `CONCENTRATED_WEIGHT` / `OLD_SIMULATION` | FAIL/ERROR ⇒ 阻断 |
 | `SELF_/PROD_/POWER_POOL_CORRELATION` | 恒 PENDING ⇒ 只作提示，绝不当作 0 |
@@ -589,6 +590,7 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 33. **跨族腿不要求单腿强**：20 条跨族候选里只有 2 条单腿 FULL S > 1.0，其余 0.3–0.7，但当混腿素材完全够用。**反过来，强腿不一定能混**：`model250` 的 ML 综合分（单腿 0.46）混进 4 腿骨架把 Sharpe 从 1.78 砸到 0.72。
 34. **成功提交的 POST 次数是失败的 20–80 倍**：FAIL 通常 1–3 次 POST 就给 403；成功要 40–80 次 200 才转 `ACTIVE`。`max_posts ≥ 60`，且循环内每 5–10 次查一次 `GET /alphas/{id}`，见 `ACTIVE` 立刻收工（§7.7.2 坑五）。
 35. **PASS 之后永远读不到 prod corr 的数值**：判定书只在 FAIL 时回传数字，ACTIVE 上 `is.prodCorrelation` 恒 0.0。报告里只能写"已过线"，不能写具体值（§7.7.2 坑四）。
+36. **质量优先于数量，别"为了交而交"**：质量差的因子交多了会把 Value Factor 打到 0.10，之后交再多也救不回来。只看 **Fitness / Margin / Returns / Drawdown**：**Fitness ≥ 2.0 才交**（2.5+ 才是好的 regular alpha），**Margin ≥ 10‱**（30‱+ 更佳），DD > Returns 直接否。平台 `LOW_FITNESS=1.0` 只是允许提交，不是值得提交（§5.1.1.1）。
 
 ---
 

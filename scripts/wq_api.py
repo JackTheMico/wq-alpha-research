@@ -60,6 +60,55 @@ STANDARD_THRESHOLDS = {
     0: {"sharpe": 1.25, "fitness": 1.00, "turnover": (0.01, 0.70)},
 }
 
+# 质量闸门：平台的 LOW_FITNESS limit=1.0 只是「允许提交」，不代表「值得提交」。
+# 社区实操共识：低质量 alpha 交多了会把 Value Factor 打到 0.10，之后交再多也救不回来
+# （「为了交而交」是新手最贵的错误）。因此本地在平台线之上再加一道质量线：
+#   * Fitness ≥ 2.0 才交；2.5 以上才算好的 regular alpha；
+#   * Margin ≥ 万分之十（10‱ = 0.001），否则收益盖不住手续费，交上去也是负贡献；
+#   * Returns / Drawdown 只做提示（无公认硬阈值，但有 dd 明显大于 ret 时应人工复核）。
+QUALITY_FITNESS_MIN = 2.0
+QUALITY_FITNESS_GOOD = 2.5
+QUALITY_MARGIN_MIN = 0.001  # 10‱
+QUALITY_MARGIN_GOOD = 0.003  # 30‱
+
+
+def quality_blockers(is_: dict) -> list[str]:
+    """质量闸门的阻断项（纯函数，便于单测）。质量优先于数量。"""
+    out: list[str] = []
+    fitness = is_.get("fitness")
+    if fitness is not None and fitness < QUALITY_FITNESS_MIN:
+        out.append(
+            f"Fitness {fitness:.2f} < 质量线 {QUALITY_FITNESS_MIN:.1f}"
+            f"（平台线只保证能提交；低质量提交会拉低 Value Factor）"
+        )
+    margin = is_.get("margin")
+    if margin is not None and margin < QUALITY_MARGIN_MIN:
+        out.append(
+            f"Margin {margin:.5f} < 质量线 {QUALITY_MARGIN_MIN:.4f}（10‱），"
+            f"收益盖不住手续费"
+        )
+    returns, drawdown = is_.get("returns"), is_.get("drawdown")
+    if (
+        isinstance(returns, (int, float))
+        and isinstance(drawdown, (int, float))
+        and abs(drawdown) > abs(returns)
+    ):
+        out.append(f"Drawdown {abs(drawdown):.2%} > Returns {abs(returns):.2%}，PnL 形态不可接受")
+    return out
+
+
+def quality_notes(is_: dict) -> list[str]:
+    """质量闸门的提示项：不阻断，但提交前应看一眼。"""
+    notes: list[str] = []
+    fitness, margin = is_.get("fitness"), is_.get("margin")
+    if fitness is not None and fitness >= QUALITY_FITNESS_GOOD:
+        notes.append(f"Fitness {fitness:.2f} ≥ {QUALITY_FITNESS_GOOD:.1f}，属于好 alpha")
+    if margin is None:
+        notes.append("Margin 缺失，无法确认交易成本覆盖（建议补 FULL 仿真）")
+    elif margin >= QUALITY_MARGIN_GOOD:
+        notes.append(f"Margin {margin:.5f} ≥ 30‱，成本覆盖充裕")
+    return notes
+
 # GET /simulations/<id> 的终态；WARNING 也可能带 alpha
 TERMINAL_STATUSES = {"COMPLETE", "WARNING", "ERROR", "TIMEOUT", "FAIL", "CANCELLED"}
 ALPHA_STATUSES = {"COMPLETE", "WARNING"}
@@ -767,6 +816,7 @@ class BrainSession:
         *,
         delay: Optional[int] = None,
         strict: bool = True,
+        quality: bool = True,
     ) -> tuple[bool, list[str]]:
         """按顾问级阈值给出可读的提交判定（本地前置检查）。
 
@@ -774,6 +824,10 @@ class BrainSession:
         在仿真后显示 `WARNING`，只要 `value < limit` 就判为阻断——因为提交时平台会
         把同样数值重新裁定为 `FAIL`（实测 IS_LADDER_SHARPE 0.88/1.58）。传
         `strict=False` 可退回旧口径（只看 FAIL/ERROR），仅用于复盘对照。
+
+        `quality=True`（默认）在平台线之上再加一道**质量闸门**：Fitness < 2.0 或
+        Margin < 10‱ 直接阻断（见 `QUALITY_FITNESS_MIN` / `QUALITY_MARGIN_MIN`）。
+        低质量提交会拉低 Value Factor，宁可少交。传 `quality=False` 只看平台线。
 
         注意：返回 True 仍只是**必要条件**。`PROD_CORRELATION` 无法本地预测
         （见 §5.2），所以 True 不等于"一定能过"。
@@ -794,6 +848,10 @@ class BrainSession:
             lo, hi = th["turnover"]
             if not lo <= turnover <= hi:
                 blockers.append(f"Turnover {turnover:.2%} 不在 [{lo:.0%}, {hi:.0%}]")
+
+        if quality:
+            blockers.extend(quality_blockers(is_))
+            notes.extend(quality_notes(is_))
 
         checks = self.checks(alpha)
         for name, check in checks.items():
@@ -1123,6 +1181,10 @@ __all__ = [
     "CONSULTANT_THRESHOLDS",
     "DEFAULT_SETTINGS",
     "GATE_LADDER_MIN_RATIO",
+    "QUALITY_FITNESS_GOOD",
+    "QUALITY_FITNESS_MIN",
+    "QUALITY_MARGIN_GOOD",
+    "QUALITY_MARGIN_MIN",
     "STRICT_BLOCKING_CHECKS",
     "VALID_SETTING_KEYS",
     "aligned_corr",

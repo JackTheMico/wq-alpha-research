@@ -31,8 +31,11 @@ CONSULTANT_D1 = {"sharpe": 1.58, "fitness": 1.00, "turnover": (0.01, 0.70)}
 def make_alpha(
     *,
     sharpe=1.80,
-    fitness=1.26,
+    fitness=2.10,
     turnover=0.16,
+    returns=0.079,
+    drawdown=0.044,
+    margin=0.0020,
     checks=None,
     region="EUR",
     universe="TOP2500",
@@ -53,8 +56,9 @@ def make_alpha(
             "sharpe": sharpe,
             "fitness": fitness,
             "turnover": turnover,
-            "returns": 0.079,
-            "drawdown": 0.044,
+            "returns": returns,
+            "drawdown": drawdown,
+            "margin": margin,
             "checks": checks if checks is not None else [],
         },
     }
@@ -125,6 +129,55 @@ class TestLadderStrict:
     def test_preflight_no_go_on_turnover_out_of_band(self):
         res = preflight.evaluate(make_alpha(turnover=0.85), CONSULTANT_D1)
         assert res["verdict"] == "NO-GO"
+
+
+# --------------------------------------------------------------------------
+# 1.1 质量闸门：平台线之上再卡 Fitness / Margin（质量 > 数量）
+# --------------------------------------------------------------------------
+class TestQualityGate:
+    def test_gate_report_blocks_low_fitness(self):
+        """平台 Fitness 1.0 只是允许提交；本地质量线要 2.0。"""
+        brain = BrainSession(username="u", password="p")
+        ok, msgs = brain.gate_report(make_alpha(fitness=1.60), delay=1)
+        assert ok is False
+        assert any("质量线" in m and "Fitness" in m for m in msgs)
+
+    def test_gate_report_allows_low_fitness_when_quality_off(self):
+        brain = BrainSession(username="u", password="p")
+        ok, _ = brain.gate_report(make_alpha(fitness=1.60), delay=1, quality=False)
+        assert ok is True
+
+    def test_gate_report_blocks_low_margin(self):
+        """Margin < 10‱ 赚不过手续费。"""
+        brain = BrainSession(username="u", password="p")
+        ok, msgs = brain.gate_report(make_alpha(margin=0.0005), delay=1)
+        assert ok is False
+        assert any("Margin" in m and "10‱" in m for m in msgs)
+
+    def test_gate_report_missing_margin_is_note_not_blocker(self):
+        brain = BrainSession(username="u", password="p")
+        alpha = make_alpha()
+        alpha["is"].pop("margin")
+        ok, msgs = brain.gate_report(alpha, delay=1)
+        assert ok is True
+        assert any("Margin 缺失" in m for m in msgs)
+
+    def test_gate_report_blocks_drawdown_larger_than_returns(self):
+        """回撤大于收益的 PnL 形态不可接受。"""
+        brain = BrainSession(username="u", password="p")
+        ok, msgs = brain.gate_report(make_alpha(returns=0.05, drawdown=0.12), delay=1)
+        assert ok is False
+        assert any("Drawdown" in m for m in msgs)
+
+    def test_preflight_no_go_on_low_margin(self):
+        res = preflight.evaluate(make_alpha(margin=0.0004), CONSULTANT_D1)
+        assert res["verdict"] == "NO-GO"
+        assert any("Margin" in b for b in res["blockers"])
+
+    def test_preflight_go_on_good_quality(self):
+        res = preflight.evaluate(make_alpha(fitness=2.60, margin=0.0035), CONSULTANT_D1)
+        assert res["verdict"] == "GO"
+        assert any("质量线" in line for line in preflight.render(res).splitlines())
 
 
 # --------------------------------------------------------------------------
