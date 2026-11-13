@@ -71,6 +71,27 @@ QUALITY_FITNESS_GOOD = 2.5
 QUALITY_MARGIN_MIN = 0.001  # 10‱
 QUALITY_MARGIN_GOOD = 0.003  # 30‱
 
+# 数据历史硬门槛：字段可回测天数 < 500 时，平台在提交那一刻返回
+# `LOW_DURATION = <天数> / 500`。2026-11-13 实测 analyst15 的
+# `ebg_sector_18mo_marketcap_percent` 只有 50 天：Sharpe 2.05 / Fitness 2.22 /
+# Margin 65.5‱ 全绿，仍然无法提交。关键在于这一项**在 QUICK/FULL 的
+# `is.checks` 里都不出现**，只有 `POST /alphas/{id}/submit` 才回算，
+# 所以本地只能靠快照 `dateCreated` 的年龄提前估算（见 preflight 的年龄闸门）。
+MIN_DURATION_DAYS = 500
+
+
+def duration_blockers(checks: dict) -> list[str]:
+    """LOW_DURATION：字段历史不足，提交必拒。纯函数，便于单测。"""
+    check = checks.get("LOW_DURATION")
+    if not check:
+        return []
+    if check.get("result") in ("FAIL", "ERROR"):
+        return [
+            f"LOW_DURATION = {check.get('result')} {check.get('value')}/{check.get('limit')}"
+            f"（字段可回测天数 < {MIN_DURATION_DAYS}，无法提交）"
+        ]
+    return []
+
 
 def quality_blockers(is_: dict) -> list[str]:
     """质量闸门的阻断项（纯函数，便于单测）。质量优先于数量。"""
@@ -117,7 +138,7 @@ ALPHA_STATUSES = {"COMPLETE", "WARNING"}
 BLOCKING_CHECKS = {
     "LOW_SHARPE", "LOW_FITNESS", "LOW_TURNOVER", "HIGH_TURNOVER",
     "CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE", "IS_LADDER_SHARPE",
-    "LOW_2Y_SHARPE", "POWER_POOL_CORRELATION",
+    "LOW_2Y_SHARPE", "POWER_POOL_CORRELATION", "LOW_DURATION",
     "SELF_CORRELATION", "PROD_CORRELATION", "DATA_DIVERSITY",
     "REGULAR_SUBMISSION", "OLD_SIMULATION",
 }

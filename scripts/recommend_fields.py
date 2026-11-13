@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
-"""字段推荐引擎（Onboard 蓝海优先）。
+"""字段推荐引擎（可提交的冷门字段优先）。
 
-核心策略：Onboard 时间 × alphaCount 双轮筛选
+核心策略：数据历史 × alphaCount 双轮筛选
 
-  真正的无人区蓝海 = dateCreated（onboard 时间）近 × alphaCount 低
-  
-  刚上线的新数据集/新扩充字段，全平台还没几个人跑过，具备三大优势：
-  ① Prod Correlation 极低（先发优势）
-  ② Dynamic Pyramid 倍率极高（冷门金字塔常 1.3x–1.8x）
-  ③ ATOM 模板（vector_neut + ts_mean/ts_backfill）二阶结构即可直接过检
-  
-  典型蓝海实例（实测快照）：
-  • USA 2026-03 analyst4 新扩充 503 字段 → αCount=0, userCount=0（没人跑过！）
-  • GBR predictive_starmine 全新数据集 → 2150 字段 αCount=0
-  • EUR pv20 / analyst10 新字段 → αCount=1–3
+  可提交的冷门字段 = dateCreated 年龄够长（LOW_DURATION ≥ 500 天）× alphaCount 低
+
+  为什么不能一味追「刚上线」：2026-11-13 实测，analyst15 的新字段
+  `ebg_sector_18mo_marketcap_percent` 只有 50 天可回测历史，ATOM 单腿
+  Sharpe 2.05 / Fitness 2.22 / Margin 65.5‱ 全部达标，提交时仍被
+  `LOW_DURATION = 50 / 500` 拒掉。**新 onboard 字段在攒满 500 天数据前
+  只能看、不能变现。** 因此默认过滤掉上线不足 500 天的字段，把「新」的
+  定义退到 500–1095 天这个区间：历史够提交、alphaCount 又还没起来。
+
+  这类字段仍具备三大优势：
+  ① Prod Correlation 较低（先发优势）
+  ② Dynamic Pyramid 倍率较高（冷门金字塔常 1.3x–1.8x）
+  ③ ATOM 模板（vector_neut + ts_mean）二阶结构即可直接过检
 
 降级策略：
-  当没有足够新蓝海字段时，回退到 VF（Value Factor）经典数据集的冷字段——
+  当没有足够冷门字段时，回退到 VF（Value Factor）经典数据集的冷字段——
   即经典数据集内最近扩充/还没被大量使用的字段。
 
 用法：
     python scripts/recommend_fields.py --region usa --universe top3000
-    python scripts/recommend_fields.py --region gbr --universe top700    # GBR 蓝海多
+    python scripts/recommend_fields.py --region gbr --universe top700    # GBR 冷门多
     python scripts/recommend_fields.py --region glb --universe top3000 --refresh
-    python scripts/recommend_fields.py --region usa --universe top3000 --days 365 --max-alpha 50
+    python scripts/recommend_fields.py --region usa --universe top3000 --days 1095 --max-alpha 50
     python scripts/recommend_fields.py --region usa --universe top3000 --mode vf      # VF 兜底
-    python scripts/recommend_fields.py --region usa --universe top3000 --pyramid       # 估算倍率
+    python scripts/recommend_fields.py --region usa --universe top3000 --min-age 0    # 含不可提交的新字段
 """
 from __future__ import annotations
 
@@ -74,7 +76,8 @@ ATOM_EXCLUDE_KEYWORDS = {
 }
 
 # 蓝海闸门默认值
-BLUESEA_DAYS_MAX = 365          # onboard 时间窗口：1 年内
+MIN_SUBMITTABLE_DAYS = 500      # 平台 LOW_DURATION 下限：不足 500 天的字段提交必拒
+BLUESEA_DAYS_MAX = 1095         # onboard 时间窗口：3 年内（在可提交区间里挑较新的）
 BLUESEA_ALPHA_MAX = 100         # alphaCount 上限
 BLUESEA_COV_MIN = 0.5           # 覆盖度下限
 
@@ -152,8 +155,12 @@ def is_vf_classic(f: dict) -> bool:
 
 
 def is_blue_sea(f: dict, *, days_max: float = BLUESEA_DAYS_MAX,
-                alpha_max: int = BLUESEA_ALPHA_MAX) -> bool:
-    """真正的蓝海：新上线 + 低 alphaCount + MATRIX + 覆盖够 + 非低质量。"""
+                alpha_max: int = BLUESEA_ALPHA_MAX,
+                min_age: float = MIN_SUBMITTABLE_DAYS) -> bool:
+    """可提交的冷门字段：历史够长 + 低 alphaCount + MATRIX + 覆盖够 + 非低质量。
+
+    `min_age` 对应平台 `LOW_DURATION` 下限——历史不足 500 天的字段再漂亮也提交不了。
+    """
     if is_low_quality(f):
         return False
     if f.get("type") != "MATRIX":
@@ -162,7 +169,7 @@ def is_blue_sea(f: dict, *, days_max: float = BLUESEA_DAYS_MAX,
     if cov < BLUESEA_COV_MIN:
         return False
     d = _days_since(f.get("dateCreated"))
-    if d > days_max:
+    if d < min_age or d > days_max:
         return False
     ac = f.get("alphaCount", 0) or 0
     if ac > alpha_max:
@@ -224,13 +231,16 @@ def filter_fields(
     mode: str = "bluesea",
     days_max: float = BLUESEA_DAYS_MAX,
     alpha_max: int = BLUESEA_ALPHA_MAX,
+    min_age: float = MIN_SUBMITTABLE_DAYS,
 ) -> list[dict]:
     """按 mode 筛选 + 排序。
 
     modes:
-      bluesea  — 蓝海优先：新上线 × 低 αCount（按 onboard 时间升序 + αCount 升序）
+      bluesea  — 冷门优先：可提交年龄 × 低 αCount（按 onboard 天升序 + αCount 升序）
       vf       — VF 兜底：经典数据集内的冷字段（先经典内新冷，再非经典新冷）
       cold     — 旧式冷门：纯 alphaCount 升序（仅当快照无 dateCreated 数据时用）
+
+    `min_age` 是所有 mode 共用的提交底线（默认 500 天，对应 LOW_DURATION）。
     """
     now = datetime.now(timezone.utc)
     result: list[dict] = []
@@ -247,6 +257,9 @@ def filter_fields(
         # 衍生信号黑名单
         text = (f.get("id", "") + " " + f.get("description", "")).lower()
         if any(kw in text for kw in BLACKLIST_KEYWORDS):
+            continue
+        # 提交底线：历史不足 500 天的字段跑得再好也交不上去（LOW_DURATION）
+        if _days_since(f.get("dateCreated"), now=now) < min_age:
             continue
 
         if mode == "bluesea":
@@ -413,7 +426,7 @@ def _format_field_table(
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="字段推荐引擎（Onboard 蓝海优先）"
+        description="字段推荐引擎（可提交的冷门字段优先）"
     )
     ap.add_argument("--region", required=True, help="区域，如 usa/gbr/eur/glb")
     ap.add_argument("--universe", required=True, help="宇宙，如 top3000/top700/top2500")
@@ -425,15 +438,19 @@ def main() -> int:
         "--mode",
         choices=("bluesea", "vf", "cold"),
         default="bluesea",
-        help="bluesea=新上线×低αCount（默认）；vf=VF 经典兜底；cold=旧式冷门",
+        help="bluesea=可提交年龄×低αCount（默认）；vf=VF 经典兜底；cold=旧式冷门",
     )
     ap.add_argument(
         "--days", type=int, default=BLUESEA_DAYS_MAX,
-        help=f"bluesea 模式 onboard 时间窗口（默认 {BLUESEA_DAYS_MAX} 天）",
+        help=f"bluesea 模式 onboard 时间窗口上限（默认 {BLUESEA_DAYS_MAX} 天）",
     )
     ap.add_argument(
         "--max-alpha", type=int, default=BLUESEA_ALPHA_MAX,
         help=f"bluesea 模式 alphaCount 上限（默认 {BLUESEA_ALPHA_MAX}）",
+    )
+    ap.add_argument(
+        "--min-age", type=int, default=MIN_SUBMITTABLE_DAYS,
+        help=f"字段最短历史天数（默认 {MIN_SUBMITTABLE_DAYS}，对应 LOW_DURATION；传 0 可看新字段）",
     )
     ap.add_argument("--pyramid", action="store_true", help="显示 Pyramid 倍率估算")
     args = ap.parse_args()
@@ -467,6 +484,7 @@ def main() -> int:
     # 筛选
     filtered = filter_fields(
         fields, mode=args.mode, days_max=args.days, alpha_max=args.max_alpha,
+        min_age=args.min_age,
     )
     before_active = len(filtered)
     filtered = [f for f in filtered if f["id"] not in active_used]
@@ -487,6 +505,7 @@ def main() -> int:
             "delay": args.delay,
             "mode": args.mode,
             "days_window": args.days,
+            "min_age_days": args.min_age,
             "max_alpha": args.max_alpha,
             "snapshot_age_days": round(age_days, 1),
             "has_dateCreated": has_date_created,
@@ -519,7 +538,7 @@ def main() -> int:
 
     # 文本输出
     mode_label = {
-        "bluesea": f"🌊 蓝海优先（< {args.days} 天 + αCount < {args.max_alpha}）",
+        "bluesea": f"🌊 可提交冷门（{args.min_age}–{args.days} 天 + αCount < {args.max_alpha}）",
         "vf": "📀 VF 经典兜底",
         "cold": "❄️ 旧式冷门备用",
     }[args.mode]

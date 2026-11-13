@@ -419,6 +419,7 @@ submit 端点**，直到拿到 `403`（判定书，body 里是完整 checks）�
 | LOW_SUB_UNIVERSE_SHARPE | TOPXXX：`subU_Sharpe ≥ 0.75·√(size_ratio)·Sharpe` | 小票依赖 | 用基本面、SUBINDUSTRY、避免市值倾斜 |
 | **IS_LADDER_SHARPE** | 分年阶梯（D1 FAIL 1.59；见 5.2.1） | 近年 Sharpe 衰减 | 提高近年表现；TO<30% 时 PASS 阈值×0.85。⚠️ 仿真后可能只标 `WARNING`，**提交时按 FAIL 判**，看数值不看标签（§9.0） |
 | **LOW_2Y_SHARPE** | 近 2 年 Sharpe ≥ 1.58（D1） | 近年失效 | 同上 |
+| **LOW_DURATION** | 字段可回测天数 ≥ 500 | 数据历史不足 | 换历史 ≥ 500 天的字段。⚠️ **QUICK/FULL 的 `is.checks` 里都不出现**，只有提交那一刻才回算（见下） |
 | **SELF_CORRELATION** | 0.7（信号级） | 与已提交 alpha 太像 | 换信号簇/换数据源；不要只调参数 |
 | **PROD_CORRELATION** | 0.7（对 PROD 池） | 与生产池太像 | 顾问独有，**本地护栏完全无法预测**（见下） |
 | **POWER_POOL_CORRELATION** | 0.5 | Power Pool 通道内相关性 | 见 §5.1.2；⚠️ 实测在 ACTIVE 上恒 `PENDING`，平台不回算，只能按复杂度约束自行预筛 |
@@ -427,6 +428,24 @@ submit 端点**，直到拿到 `403`（判定书，body 里是完整 checks）�
 | CLUSTER_TEST | Sharpe ≥ 1.58（KOR/JPS/TWN/HKG/IND/GBR/DEU ≥ 1） | 仅分类，不阻断 | 无影响（`ERROR` 也不阻断） |
 | MATCHES_PYRAMID / MATCHES_THEMES | multiplier | 仅加分项 | 无影响 |
 | OSMOSIS_ALLOCATION | — | 仅 WARNING | 无影响 |
+
+**LOW_DURATION：新字段的隐形天花板（2026-11-13 实测）**
+
+字段可回测天数不足 500 天时，提交会被拒，而**这一项在仿真结果里根本看不到**：
+
+| 阶段 | `LOW_DURATION` 表现 |
+|---|---|
+| QUICK 仿真 | `is.checks` 里没有这一项 |
+| FULL 仿真 | `is.checks` 里同样没有 |
+| `POST /alphas/{id}/submit` | 403 判定书：`LOW_DURATION = 50 / 500` |
+
+实测样本 `ebg_sector_18mo_marketcap_percent`（analyst15，EUR/TOP2500，ATOM 20v250/MARKET/d0）：
+Sharpe 2.05、Fitness 2.22、Margin 65.5‱、SubU PASS，质量线全过，仍因 50 天历史被拒。
+
+因此：
+1. 选字段时用快照 `dateCreated` 年龄先卡 **≥ 500 天**（`recommend_fields.py --min-age`，默认 500）；
+2. `preflight` 会用字段年龄兜底阻断（`crowding_prior(...)['min_age_days']`）；
+3. 追"最新 onboard"时要把这条算进去——**新字段在 500 天前只能研究，不能变现**。
 
 **PROD_CORRELATION 的不可预测性（2026-10-30 实测，重要）**
 

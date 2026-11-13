@@ -591,6 +591,7 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 34. **成功提交的 POST 次数是失败的 20–80 倍**：FAIL 通常 1–3 次 POST 就给 403；成功要 40–80 次 200 才转 `ACTIVE`。`max_posts ≥ 60`，且循环内每 5–10 次查一次 `GET /alphas/{id}`，见 `ACTIVE` 立刻收工（§7.7.2 坑五）。
 35. **PASS 之后永远读不到 prod corr 的数值**：判定书只在 FAIL 时回传数字，ACTIVE 上 `is.prodCorrelation` 恒 0.0。报告里只能写"已过线"，不能写具体值（§7.7.2 坑四）。
 36. **质量优先于数量，别"为了交而交"**：质量差的因子交多了会把 Value Factor 打到 0.10，之后交再多也救不回来。只看 **Fitness / Margin / Returns / Drawdown**：**Fitness ≥ 2.0 才交**（2.5+ 才是好的 regular alpha），**Margin ≥ 10‱**（30‱+ 更佳），DD > Returns 直接否。平台 `LOW_FITNESS=1.0` 只是允许提交，不是值得提交（§5.1.1.1）。
+37. **新 onboard 字段攒满 500 天之前只能看、不能交**：提交时 `LOW_DURATION = 可回测天数 / 500`，而这一项在 QUICK/FULL 的 `is.checks` 里**完全不出现**（2026-11-13 实测 analyst15 `ebg_sector_18mo_marketcap_percent`：仅 50 天历史，S 2.05 / F 2.22 / Margin 65.5‱ 全绿，提交仍被拒）。选字段时用快照 `dateCreated` 年龄先卡 `≥ 500 天`，`preflight` 也会用字段年龄提前阻断；追"最新上线"必须把这条算进去。
 
 ---
 

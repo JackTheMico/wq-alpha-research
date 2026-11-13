@@ -181,6 +181,66 @@ class TestQualityGate:
 
 
 # --------------------------------------------------------------------------
+# 1.2 数据历史闸门：LOW_DURATION < 500 天不能提交（2026-11-13 实测）
+# --------------------------------------------------------------------------
+class TestDurationGate:
+    def test_duration_blockers_reads_check(self):
+        from wq_api import MIN_DURATION_DAYS, duration_blockers
+
+        assert MIN_DURATION_DAYS == 500
+        assert duration_blockers({}) == []
+        msgs = duration_blockers({"LOW_DURATION": check("LOW_DURATION", "FAIL", 50, 500)})
+        assert msgs and "LOW_DURATION" in msgs[0]
+
+    def test_gate_report_blocks_low_duration(self):
+        """Sharpe 2.05 / Fitness 2.22 / Margin 65.5‱ 全绿也照样阻断。"""
+        brain = BrainSession(username="u", password="p")
+        alpha = make_alpha(checks=[check("LOW_DURATION", "FAIL", 50, 500)])
+        ok, msgs = brain.gate_report(alpha, delay=1)
+        assert ok is False
+        assert any("LOW_DURATION" in m for m in msgs)
+
+    def test_preflight_blocks_low_duration_check(self):
+        res = preflight.evaluate(
+            make_alpha(checks=[check("LOW_DURATION", "FAIL", 50, 500)]),
+            CONSULTANT_D1,
+        )
+        assert res["verdict"] == "NO-GO"
+        assert any("LOW_DURATION" in b for b in res["blockers"])
+
+    def test_preflight_blocks_young_field_by_age(self):
+        """LOW_DURATION 不在 is.checks 里时，用 dateCreated 年龄兜底。"""
+        prior = preflight.crowding_prior(
+            {"ebg_sector_18mo_marketcap_percent": 2},
+            {"ebg_sector_18mo_marketcap_percent": 50.0},
+        )
+        res = preflight.evaluate(make_alpha(), CONSULTANT_D1, crowding=prior)
+        assert res["verdict"] == "NO-GO"
+        assert any("LOW_DURATION" in b for b in res["blockers"])
+        assert "最年轻字段 50 天" in preflight.render(res)
+
+    def test_preflight_allows_mature_field(self):
+        prior = preflight.crowding_prior({"old_field": 3}, {"old_field": 900.0})
+        res = preflight.evaluate(make_alpha(), CONSULTANT_D1, crowding=prior)
+        assert res["verdict"] == "GO"
+        assert any("数据历史" in line for line in preflight.render(res).splitlines())
+
+    def test_unknown_age_does_not_block(self):
+        prior = preflight.crowding_prior({"f": 3})
+        res = preflight.evaluate(make_alpha(), CONSULTANT_D1, crowding=prior)
+        assert res["verdict"] == "GO"
+
+    def test_atom_expression_fields_are_extracted(self):
+        """ATOM 骨架里的 vector_neut 会被 extract_signal_fields 当成分组算子，
+        导致字段漏抽；preflight 必须兜底，否则拥挤度/年龄闸门被静默跳过。"""
+        fields = preflight.signal_fields(
+            "group_neutralize(vector_neut(ts_mean(ebg_sector_18mo_marketcap_percent, 20), "
+            "ts_mean(ebg_sector_18mo_marketcap_percent, 250)), country)"
+        )
+        assert fields == ["ebg_sector_18mo_marketcap_percent"]
+
+
+# --------------------------------------------------------------------------
 # 2. 拥挤度先验
 # --------------------------------------------------------------------------
 class TestCrowdingPrior:

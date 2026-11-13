@@ -78,40 +78,50 @@ class TestDateParsing:
 # ---------------------------------------------------------------------------
 
 class TestIsBlueSea:
-    def test_new_cold_matrix_passes(self):
-        """新上线 (30d) + 低 αCount (5) + MATRIX + 高覆盖 → 蓝"""
-        f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(30))
+    def test_mature_cold_matrix_passes(self):
+        """历史够长 (600d) + 低 αCount (5) + MATRIX + 高覆盖 → 可提交的冷门字段"""
+        f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(600))
         assert is_blue_sea(f)
 
-    def test_old_field_fails(self):
-        """距今 > 365 天 → 不是蓝海"""
-        f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(400))
+    def test_too_young_field_fails(self):
+        """2026-11-13 实测：50 天历史的字段提交时 LOW_DURATION=50/500 必拒。"""
+        f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(50))
+        assert not is_blue_sea(f)
+
+    def test_too_old_field_fails(self):
+        """距今 > 1095 天 → 不在冷门窗口内"""
+        f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(1200))
         assert not is_blue_sea(f)
 
     def test_high_alpha_fails(self):
-        """αCount > 100 → 不是蓝海"""
-        f = _field("x", alphaCount=200, coverage=0.9, dateCreated=_recent_days(30))
+        """αCount > 100 → 不算冷门"""
+        f = _field("x", alphaCount=200, coverage=0.9, dateCreated=_recent_days(600))
         assert not is_blue_sea(f)
 
     def test_non_matrix_fails(self):
-        f = _field("x", type="VECTOR", alphaCount=5, coverage=0.9, dateCreated=_recent_days(30))
+        f = _field("x", type="VECTOR", alphaCount=5, coverage=0.9, dateCreated=_recent_days(600))
         assert not is_blue_sea(f)
 
     def test_low_coverage_fails(self):
-        f = _field("x", alphaCount=5, coverage=0.3, dateCreated=_recent_days(30))
+        f = _field("x", alphaCount=5, coverage=0.3, dateCreated=_recent_days(600))
         assert not is_blue_sea(f)
 
     def test_low_quality_dataset_fails(self):
-        f = _field("x", dataset="other321", alphaCount=5, coverage=0.9, dateCreated=_recent_days(30))
+        f = _field("x", dataset="other321", alphaCount=5, coverage=0.9,
+                   dateCreated=_recent_days(600))
         assert not is_blue_sea(f)
 
     def test_custom_thresholds(self):
-        """自定义 days_max 和 alpha_max"""
-        f = _field("x", alphaCount=80, coverage=0.9, dateCreated=_recent_days(200))
-        # 默认 365d + 100α → pass
+        """自定义 days_max / alpha_max / min_age"""
+        f = _field("x", alphaCount=80, coverage=0.9, dateCreated=_recent_days(600))
+        # 默认 500–1095d + 100α → pass
         assert is_blue_sea(f)
         # 改严 → fail
-        assert not is_blue_sea(f, days_max=100, alpha_max=50)
+        assert not is_blue_sea(f, days_max=400, alpha_max=50)
+        # 放开提交底线 → 50 天的新字段也能被看见
+        young = _field("y", alphaCount=1, coverage=0.9, dateCreated=_recent_days(50))
+        assert not is_blue_sea(young)
+        assert is_blue_sea(young, days_max=365, min_age=0)
 
 
 # ---------------------------------------------------------------------------
@@ -120,49 +130,58 @@ class TestIsBlueSea:
 
 class TestFilterFields:
     def _make_mix(self):
-        """构造混合场景：新/旧 × 冷/热 × VF/非VF"""
+        """构造混合场景：可提交/过新/过旧 × 冷/热 × VF/非VF"""
         now = datetime.now(timezone.utc)
         return [
-            # 🌊 超新超冷
-            _field("new_cold_1", alphaCount=0, coverage=0.95, dataset="analyst4",
-                   dateCreated=_recent_days(10)),
-            _field("new_cold_2", alphaCount=3, coverage=0.88, dataset="predictive_starmine",
-                   dateCreated=_recent_days(60)),
+            # 🌊 历史够长又冷（可提交）
+            _field("mature_cold_1", alphaCount=0, coverage=0.95, dataset="analyst4",
+                   dateCreated=_recent_days(520)),
+            _field("mature_cold_2", alphaCount=3, coverage=0.88, dataset="predictive_starmine",
+                   dateCreated=_recent_days(700)),
+            # 太新：历史不足 500 天，提交必拒（LOW_DURATION）
+            _field("too_young", alphaCount=0, coverage=0.95, dataset="analyst4",
+                   dateCreated=_recent_days(50)),
             # 新但较热
             _field("new_hot", alphaCount=800, coverage=0.95, dataset="pv1",
-                   dateCreated=_recent_days(30)),
-            # 旧但冷
+                   dateCreated=_recent_days(560)),
+            # 旧但冷（超出 1095 天窗口）
             _field("old_cold", alphaCount=50, coverage=0.7, dataset="fundamental6",
-                   dateCreated=_recent_days(500)),
+                   dateCreated=_recent_days(1200)),
             # 旧且热
             _field("old_hot", alphaCount=15000, coverage=1.0, dataset="pv1",
                    dateCreated=_recent_days(1500)),
             # 低质量
             _field("bad_mapping", dataset="other321", alphaCount=0, coverage=0.95,
-                   dateCreated=_recent_days(30)),
+                   dateCreated=_recent_days(600)),
             # VECTOR
             _field("vec_field", type="VECTOR", alphaCount=5, coverage=0.95,
-                   dateCreated=_recent_days(30)),
+                   dateCreated=_recent_days(600)),
             # 低覆盖
-            _field("low_cov", alphaCount=5, coverage=0.3, dateCreated=_recent_days(30)),
+            _field("low_cov", alphaCount=5, coverage=0.3, dateCreated=_recent_days(600)),
             # 衍生信号黑名单
             _field("rank_score", alphaCount=5, coverage=0.9,
                    description="rank based zscore signal factor",
-                   dateCreated=_recent_days(30)),
+                   dateCreated=_recent_days(600)),
         ]
 
     def test_bluesea_mode(self):
-        """bluesea 模式：新×冷优先"""
+        """bluesea 模式：可提交年龄 × 冷优先"""
         fields = self._make_mix()
         result = filter_fields(fields, mode="bluesea")
         ids = [f["id"] for f in result]
         # bad_mapping / vec_field / low_cov / rank_score 被通用闸门排除
-        # old_cold / old_hot 因日期太旧被时间闸门排除
+        # too_young 被 500 天提交底线排除
+        # old_hot / old_cold 因超过 1095 天窗口被排除
         # new_hot 因 αCount 太高被 αCount 闸门排除
-        # 只剩 new_cold_1 / new_cold_2
-        assert set(ids) == {"new_cold_1", "new_cold_2"}
+        assert set(ids) == {"mature_cold_1", "mature_cold_2"}
         # 按时间升序
-        assert result[0]["id"] == "new_cold_1"  # 10 天前
+        assert result[0]["id"] == "mature_cold_1"  # 520 天前
+
+    def test_too_young_visible_when_min_age_zero(self):
+        """放开提交底线时，新字段仍然可见（研究用，不代表能交）。"""
+        fields = self._make_mix()
+        ids = {f["id"] for f in filter_fields(fields, mode="bluesea", min_age=0)}
+        assert "too_young" in ids
 
     def test_vf_mode(self):
         """vf 模式：经典数据集内的字段优先（不受时间+αCount闸门限制）"""
@@ -174,8 +193,8 @@ class TestFilterFields:
         # old_hot(pv1, αCount=15000) 也 > 5000，排除
         # 经典数据集（analyst4 / fundamental6）优先
         assert "old_cold" in ids  # fundamental6 在 VF 内
-        assert "new_cold_1" in ids  # analyst4 在 VF 内
-        assert "new_cold_2" in ids  # predictive_starmine 不在 VF 但通过闸门
+        assert "mature_cold_1" in ids  # analyst4 在 VF 内
+        assert "mature_cold_2" in ids  # predictive_starmine 不在 VF 但通过闸门
 
     def test_no_datecreated_falls_back(self):
         """无 dateCreated 的旧快照 → bluesea 模式几乎过不了，vf/cold 还行"""
@@ -194,18 +213,18 @@ class TestFilterFields:
 
     def test_excludes_blacklist(self):
         f = _field("rank_score_field", description="rank based zscore normalized signal factor",
-                   dateCreated=_recent_days(10))
+                   dateCreated=_recent_days(600))
         assert filter_fields([f], mode="bluesea") == []
 
     def test_excludes_low_quality(self):
         for ds in LOW_QUALITY_DATASETS:
-            f = _field("x", dataset=ds, dateCreated=_recent_days(10))
+            f = _field("x", dataset=ds, dateCreated=_recent_days(600))
             assert filter_fields([f], mode="bluesea") == [], f"should exclude {ds}"
 
     def test_vf_classic_not_excluded(self):
         """经典数据集是首选，不是饱和！"""
         for ds in list(VF_CLASSIC_DATASETS)[:3]:
-            f = _field("x", dataset=ds, alphaCount=3, dateCreated=_recent_days(20))
+            f = _field("x", dataset=ds, alphaCount=3, dateCreated=_recent_days(600))
             result = filter_fields([f], mode="bluesea")
             assert len(result) == 1, f"VF classic {ds} should NOT be excluded"
 

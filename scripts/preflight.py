@@ -9,6 +9,10 @@
   * `IS_LADDER_SHARPE = 0.88 / 1.58` —— 仿真后是 WARNING，提交时被判 FAIL；
   * `PROD_CORRELATION = 0.8314 / 0.7` —— 仿真后是 PENDING，平台只在提交那刻回算。
 
+2026-11-13 又补一条：`LOW_DURATION = 50 / 500`。字段只有 50 天可回测历史时，
+Sharpe 2.05 / Fitness 2.22 / Margin 65.5‱ 也照样被拒；这一项在 QUICK/FULL 的
+`is.checks` 里完全不出现，只能靠快照 `dateCreated` 的年龄提前估算（见年龄闸门）。
+
 也就是说：**"指标全绿" 和 "能提交" 之间还隔着一道本地看不见的闸门。**
 这个脚本把已知的可见部分全部前移，把不可见部分（生产池相关性）用拥挤度先验
 量化成风险等级，避免继续用提交额度做盲试。
@@ -33,13 +37,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wq_api import (  # noqa: E402
+    MIN_DURATION_DAYS,
     QUALITY_FITNESS_MIN,
     QUALITY_MARGIN_MIN,
     BrainError,
@@ -48,7 +55,16 @@ from wq_api import (  # noqa: E402
     quality_blockers,
     quality_notes,
 )
-from static_check import BASE_PRICE_FIELDS, extract_signal_fields  # noqa: E402
+from static_check import (  # noqa: E402
+    BASE_PRICE_FIELDS,
+    GROUP_OPERATORS,
+    SIGNAL_OPERATORS,
+    extract_signal_fields,
+)
+
+GROUP_KEY_TOKENS = {
+    "country", "region", "industry", "subindustry", "sector", "market", "exchange",
+}
 
 # 拥挤度先验：用 alphaCount 近似 PROD_CORRELATION 风险。
 # 标定样本（同一字段 `star_val_sector_rank`，同一账户）：
@@ -69,11 +85,48 @@ def _num(value: Any) -> Optional[float]:
         return None
 
 
-def crowding_prior(field_counts: dict[str, Optional[int]]) -> dict:
-    """把字段 alphaCount 归成风险等级。纯函数，便于单测。"""
+def _age_days(date_created: Any) -> Optional[float]:
+    """字段 dateCreated 距今多少天。解析失败返回 None（当作未知，不阻断）。"""
+    if not isinstance(date_created, str) or len(date_created) < 10:
+        return None
+    try:
+        created = datetime.strptime(date_created[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - created).total_seconds() / 86400
+
+
+def signal_fields(expression: str) -> list[str]:
+    """表达式里的信号字段（保持出现顺序）。
+
+    `extract_signal_fields` 把 `vector_neut` 当分组算子，ATOM 骨架
+    `vector_neut(ts_mean(f,20), ts_mean(f,250))` 会抽出空集，导致拥挤度与
+    字段年龄闸门被静默跳过。这里在空集时按标识符兜底。
+    """
+    fields = [f for f in extract_signal_fields(expression) if f not in BASE_PRICE_FIELDS]
+    if fields:
+        return sorted(fields)
+    skip = SIGNAL_OPERATORS | GROUP_OPERATORS | GROUP_KEY_TOKENS | {"vector_neut", "neut"}
+    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression or "")
+    return [t for t in dict.fromkeys(tokens)
+            if t not in skip and t not in BASE_PRICE_FIELDS]
+
+
+def crowding_prior(
+    field_counts: dict[str, Optional[int]],
+    field_ages: Optional[dict[str, Optional[float]]] = None,
+) -> dict:
+    """把字段 alphaCount 归成风险等级，并带上最年轻字段的年龄。纯函数，便于单测。"""
     known = {k: v for k, v in field_counts.items() if v is not None}
+    ages = {k: v for k, v in (field_ages or {}).items() if v is not None}
+    facts = {
+        "field_ages": ages,
+        "min_age_days": min(ages.values()) if ages else None,
+        "youngest_field": min(ages, key=ages.get) if ages else None,
+    }
     if not known:
-        return {"level": "unknown", "max_alpha_count": None, "detail": "未能取到 alphaCount"}
+        return {"level": "unknown", "max_alpha_count": None,
+                "detail": "未能取到 alphaCount", **facts}
     worst_field, worst = max(known.items(), key=lambda kv: kv[1])
     if worst >= CROWD_HIGH:
         level, hint = "high", f"{worst_field} 已有 {worst} 个 alpha，同族极易撞 PROD_CORRELATION"
@@ -81,7 +134,8 @@ def crowding_prior(field_counts: dict[str, Optional[int]]) -> dict:
         level, hint = "mid", f"{worst_field} 已有 {worst} 个 alpha，形态必须与主流量化因子不同"
     else:
         level, hint = "low", f"最拥挤字段 {worst_field} 仅 {worst} 个 alpha（冷门≠有效，仍需看信号）"
-    return {"level": level, "max_alpha_count": worst, "worst_field": worst_field, "detail": hint}
+    return {"level": level, "max_alpha_count": worst, "worst_field": worst_field,
+            "detail": hint, **facts}
 
 
 def evaluate(
@@ -154,7 +208,7 @@ def evaluate(
 
     # 其余阻断项
     for name in ("LOW_SUB_UNIVERSE_SHARPE", "CONCENTRATED_WEIGHT", "LOW_TURNOVER",
-                 "HIGH_TURNOVER", "OLD_SIMULATION", "DATA_DIVERSITY"):
+                 "HIGH_TURNOVER", "OLD_SIMULATION", "DATA_DIVERSITY", "LOW_DURATION"):
         check = checks.get(name)
         if check and check.get("result") in ("FAIL", "ERROR"):
             blockers.append(f"{name} = {check.get('result')} {check.get('value')}/{check.get('limit')}")
@@ -174,6 +228,16 @@ def evaluate(
             warnings.append(f"拥挤度先验 MID：{crowding.get('detail')}")
         elif level == "low":
             warnings.append(f"拥挤度先验 LOW：{crowding.get('detail')}")
+
+    # 数据历史闸门：LOW_DURATION 只有提交那一刻才回算，本地只能按 dateCreated 年龄估
+    if crowding:
+        min_age = crowding.get("min_age_days")
+        youngest = crowding.get("youngest_field")
+        if min_age is not None and min_age < MIN_DURATION_DAYS:
+            blockers.append(
+                f"{youngest} 上线约 {int(min_age)} 天 < {MIN_DURATION_DAYS} 天，"
+                f"提交时 LOW_DURATION 必拒（字段可回测历史不足）"
+            )
 
     return {
         "alpha_id": alpha.get("id"),
@@ -205,8 +269,9 @@ def collect_crowding(brain: BrainSession, alpha: dict) -> Optional[dict]:
     delay = settings.get("delay")
     if not expression or not region:
         return None
-    fields = [f for f in extract_signal_fields(expression) if f not in BASE_PRICE_FIELDS]
+    fields = signal_fields(expression)
     counts: dict[str, Optional[int]] = {}
+    ages: dict[str, Optional[float]] = {}
     for fid in fields:
         entries = field_availability(brain, fid, region=region, universe=universe, delay=delay)
         if not entries:
@@ -214,7 +279,10 @@ def collect_crowding(brain: BrainSession, alpha: dict) -> Optional[dict]:
             entries = field_availability(brain, fid, region=region, delay=delay)
         values = [e.get("alphaCount") for e in entries if e.get("alphaCount") is not None]
         counts[fid] = max(values) if values else None
-    return crowding_prior(counts)
+        field_ages = [_age_days(e.get("dateCreated")) for e in entries]
+        known_ages = [a for a in field_ages if a is not None]
+        ages[fid] = max(known_ages) if known_ages else None
+    return crowding_prior(counts, ages)
 
 
 def render(result: dict) -> str:
@@ -242,6 +310,13 @@ def render(result: dict) -> str:
         )
     if result.get("crowding"):
         lines.append(f"  拥挤度先验: {result['crowding']['level'].upper()} — {result['crowding']['detail']}")
+        age = result["crowding"].get("min_age_days")
+        if age is not None:
+            mark = "✗" if age < MIN_DURATION_DAYS else "✓"
+            lines.append(
+                f"  数据历史: 最年轻字段 {int(age)} 天 {mark} 下限 {MIN_DURATION_DAYS} 天"
+                f"（LOW_DURATION 只在提交时回算）"
+            )
     for msg in result["blockers"]:
         lines.append(f"  ✗ 阻断: {msg}")
     for msg in result["warnings"]:
