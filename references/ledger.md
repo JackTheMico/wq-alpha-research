@@ -201,3 +201,56 @@
 
 - EUR 与 GLB 同构：只有价格反转族有效，慢变量族更弱；EUR 反转候选 Fitness 0.79–0.83（TO 62%），需 decay 30–40 压换手后再测，且 prod corr 未知。
 - 未继续执行（用户选择归档）：EUR decay 40 变体、EUR 提交测相关、USA D1 方向。
+
+## 6. 冷门字段 × ATOM（2026-11-12/13 实测）
+
+> 骨架统一为 `group_neutralize(vector_neut(ts_mean(f,20), ts_mean(f,250)), country)`，
+> 未注明时 region/universe = EUR/TOP2500、MARKET、decay=0、QUICK。
+
+### 6.1 单腿（同骨架）
+
+| 字段 | 数据集 | S | SubU | 结论 |
+|---|---|---|---|---|
+| `ebg_sector_18mo_marketcap_percent` | analyst15 | 2.05 | PASS | 指标最好，但历史仅 50 天（见 6.3） |
+| `default_risk_region_percentile_d1` | model28 | 0.78 | PASS | 可用弱腿 |
+| `country_relative_investment_rank_d1` | model238 | 0.75 | FAIL | SubU 挂，不可单独用 |
+| `anl10_nerinnovate_increase_fy1` | analyst10 | 0.40 | PASS | 可做辅腿 |
+| `anl10_nernormal_increase_fy1` | analyst10 | 0.34 | PASS | 可做辅腿 |
+| `anl4_fs_detail_estimates_advanced_af_nd_bvps_mean` | analyst4 | 0.24 | PASS | 弱 |
+| `confidence_bucket0_pricevol_monthquarter_20d` | global_seasonal_model | -0.57 | FAIL | 反向可取 |
+| `analyst_downward_revision_count_fq1_earnings_7d_5` | predictive_starmine | -0.77 | PASS | 反向可取 |
+| `country_level_analyst_forecast_revision_score` | model50 | -0.83 | PASS | 反向最强 |
+
+GBR/TOP700 的 model264 单腿顶配只有 S 0.43（`mdl264_1l_ist`），analyst7 / predictive_starmine / model26 单腿 ≤0.16 —— **GBR 冷门族整体弱于 EUR**。
+
+### 6.2 多腿
+
+| 组合 | S | F | TO | Margin | SubU |
+|---|---|---|---|---|---|
+| GBR model264 8 腿（4 正 + 4 反，40/60） | 1.07 | 0.71 | 11.6% | 9.5‱ | PASS |
+| GBR model264 8 腿 + decay10 | 1.03 | 0.68 | 8.8% | 12.3‱ | PASS |
+| GBR model264 11 腿（去 backfill） | 1.02 | 0.66 | 10.4% | 10.2‱ | PASS |
+| EUR 5 正腿等权 | 0.67 | 0.43 | 10.2% | 9.9‱ | FAIL |
+| EUR 2 正腿（analyst15 + model28） | 0.77 | 0.54 | 2.6% | 47.7‱ | PASS |
+| EUR 0.6/0.2/0.2（analyst15 + 两条 analyst10） | 1.10 | 0.48 | 18.8% | 3.9‱ | PASS |
+| EUR 0.8/0.2（analyst15 + model28） | 0.77 | 0.54 | 2.6% | 47.7‱ | PASS |
+
+- 多腿能把单腿 0.43 放大到 1.07，但**加腿会摊薄 Margin / SubU**，且弱腿会把 Fitness 拉回 0.5 量级；
+- 单腿集中度过高时 `CONCENTRATED_WEIGHT` 在 QUICK 报 FAIL、FULL 报 WARNING，提交仍被拒。
+
+### 6.3 提交实测：LOW_DURATION 才是新字段的死因
+
+`analyst15 / ebg_sector_18mo_marketcap_percent`（FULL，alpha `RReWar7g`）：
+S 2.05 / F 2.22 / Margin 65.5‱ / SubU PASS，`CONCENTRATED_WEIGHT` 与 `LOW_2Y_SHARPE` 在 FULL 只是 WARNING，
+提交 403 判定书：
+
+```
+CONCENTRATED_WEIGHT = FAIL
+LOW_2Y_SHARPE      = 0.0 / 1.58
+LOW_DURATION       = 50 / 500     ← 真凶
+```
+
+- **`LOW_DURATION` 在 QUICK/FULL 的 `is.checks` 里完全不出现**，只有 `POST /submit` 才回算；
+- 字段只有 50 天历史 → 不可提交，与指标无关；
+- 因此「最新 onboard 字段」在攒满 500 天前只能研究，不能变现：选字段先卡 `dateCreated` 年龄 ≥ 500 天
+  （`recommend_fields.py --min-age 500`，`preflight` 用字段年龄兜底阻断）。
