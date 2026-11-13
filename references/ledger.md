@@ -254,3 +254,46 @@ LOW_DURATION       = 50 / 500     ← 真凶
 - 字段只有 50 天历史 → 不可提交，与指标无关；
 - 因此「最新 onboard 字段」在攒满 500 天前只能研究，不能变现：选字段先卡 `dateCreated` 年龄 ≥ 500 天
   （`recommend_fields.py --min-age 500`，`preflight` 用字段年龄兜底阻断）。
+
+## 7. analyst10 / EUR/TOPCS1600：全量单腿 + 论坛模板复活（2026-11-13）
+
+### 7.1 全量单腿（561 字段，ATOM `vector_neut(ts_mean20, ts_mean250)`）
+
+| 指标 | 值 |
+|---|---|
+| 有效 | 551 / 561 |
+| Sharpe | max 1.43，中位 0.15，>1.0 共 24 条 |
+| Fitness | max 0.83，**≥1.0 一条都没有** |
+| Margin | max 43.9‱，中位 2.2‱ |
+| Top30 SubU | 25 PASS / 5 FAIL |
+| Top30 2Y | **30 条全 FAIL** |
+
+最强族 `anl10_*innovation_score_fy2`（gps 1.43 / prr 1.38 / ebt 1.32 / net 1.32 / pre 1.31），
+换手稳定 17–21%。同族 `*innovate_decrease_fy2` 全部强负：prr **-1.57**、net -1.45、ebt -1.41、pre -1.38、ebi -1.35。
+
+### 7.2 论坛知识驱动的第二轮（11 条）
+
+来源：`kb.py pull "ATOM template"` / `atom模板分享`(24) / `ATOM模板分享`(28) / `ASI broker Pyramid`(96) /
+`How to Increase or Reduce Sharpe...`(40) / `ts_backfill AND ts_rank`(103)。详见 templates-core.md §4.1.4。
+
+| 变体 | S | F | TO | Margin | SubU | 结论 |
+|---|---:|---:|---:|---:|---|---|
+| **rev_prr_decrease**（-1.57 取反） | **1.57** | **0.96** | 17.9% | 7.5‱ | FAIL | 单腿最强，但 SubU 挂 |
+| **2leg_gps_revnet** | **1.50** | **0.90** | 19.5% | 7.1‱ | **PASS** | 本轮最优可复现骨架 |
+| 2leg_gps_revprr | 1.46 | 0.86 | 20.3% | 7.0‱ | PASS | 次优 |
+| signed_power_atom | 1.39 | 0.81 | 16.7% | 6.8‱ | PASS | 0.618 幂次无增益（基线 1.43） |
+| 2leg_gps_cshrev | 1.08 | 0.60 | 24.5% | 6.2‱ | PASS | 异族腿拖累 |
+| div_5_60 | 0.18 | 0.02 | 66.5% | 0.3‱ | PASS | divide 插槽无效且换手爆炸 |
+| div_20_120 | -0.04 | 0.00 | 30.7% | -0.1‱ | PASS | 同上 |
+| tsrank_div_20_250 | -0.51 | -0.08 | 176.0% | -0.5‱ | PASS | ts_rank 插槽灾难 |
+| tsrank_sub_20_250 | -0.78 | -0.14 | 171.2% | -0.7‱ | PASS | 同上 |
+| decay_exp_20_250 | ERROR | — | — | — | — | 本账户无 `ts_decay_exp_window` |
+
+**三条硬结论：**
+1. **反向 decrease 族确实是最强腿**（-1.57 → 取反 1.57），比正向 `innovation_score`(1.43) 更强；
+2. **插槽扫描必须做，但不能盲目**：该字段只有 `ts_mean × vector_neut` 存活，`
+   divide` 换手 30–66%，`ts_rank` 换手 171–176% —— 换手一崩、Margin 归零；
+3. **2 腿组合能救 SubU**：单腿 rev_prr SubU FAIL，加 gps 后 PASS（1.50 / F 0.90），
+   这是本轮唯一同时满足「S>1.4 + SubU PASS + TO<20%」的骨架。
+
+仍未提交：Fitness 0.90 < 1.0（平台线）且 < 2.0（质量线），Margin 7.1‱ < 10‱，2Y Sharpe 全族 FAIL。

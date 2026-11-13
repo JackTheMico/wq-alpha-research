@@ -161,6 +161,48 @@ rank(ts_rank(comprehensive_income_net_tax / sales * sales / assets, 126))
 > ⚠️ **换期权腿的期限/口径都不足以逃出这个簇（2026-10-30 实测 20 次仿真反证）**：把 IV 腿分别换成 90 / 120 / 270 天期限的 call-put skew、`implied_volatility_mean_skew_270/360`、`pcr_oi_270`，与池内纯 IV 腿 alpha `58p0232N` 的日收益相关仍在 **0.70–0.81**，与 `ZYE31mzx` 0.61–0.67，与 `XgoQMAq1` 0.55–0.94。原因是 SELF_CORRELATION 看的是**信号族**，不是字段串——同一个经济含义（期权 skew）换期限只是换个采样窗口。
 > **结论：模板 G 在当前池里已经饱和，继续在 IV 簇里换字段是无效工作量。要留在「双腿混合」骨架上，第二腿必须换到池外数据族**（pv1 价量反转 / news / socialmedia / model）。实测 pv1 反转腿 `rank(-(close/open-1))` 在 22 个 ACTIVE 中无人使用，配 `cashflow_op/equity` 后与池内最大相关仅 0.509。
 
+#### 4.1.4 社区 ATOM 模板的通用化（2026-11 论坛抓取）
+
+来源：社区 `atom模板分享`（24 赞）、`ATOM模板分享`（28 赞）、`【Alpha 模板】ASI 点亮 broker Pyramid`（96 赞）、
+`How to Increase or Reduce Sharpe, Turnover, Fitness, Returns, Drawdown, and Margin`（40 赞）、
+`UNDERSTANDING ts_backfill AND ts_rank OPERATORS`（103 赞）。入库命令：`python scripts/kb.py pull "ATOM template"`。
+
+**骨架不要只记住一个 `vector_neut(diff)`，社区把它抽象成两级插槽：**
+
+```
+<compare_op>( <ts_op>({DATA}, d1), <ts_op>({DATA}, d2) )
+```
+
+| 插槽 | 可选 | 说明 |
+|---|---|---|
+| `compare_op` | `subtract` / `divide` / `vector_neut` | 三种都是合法的 ATOM 二阶结构；`divide` 在 EUR/USA 实测有信号 |
+| `ts_op` | `ts_mean` / `ts_rank` / `ts_zscore` | `ts_rank` 把信号压到 0–1，天然抗离群；`ts_zscore` 做标准化 |
+| `(d1, d2)` | `(5,60)` / `(20,120)` / `(20,250)` | 社区常用三组；窗口越长换手越低 |
+
+**因此同一字段至少应做 3×3 的插槽扫描（9 条），而不是只跑 `vector_neut + ts_mean` 一种。**
+本文 §6 实测：`analyst10` 族只用 `vector_neut+ts_mean` 时上限 Fitness 0.83；`divide`/`ts_rank` 是尚未试过的插槽。
+
+**单字段非线性放大（ASI broker 模板，96 赞）：**
+
+```
+signed_power(ts_entropy({field}, 144), 0.618)          # 黄金比例幂次，放大强信号
+ts_mean(-signed_power(ts_entropy(vec_sum(brk1_conviction_flag), 144), 0.618), 120)
+```
+
+思路可复用：`signed_power(x, 0.618)` 对任何有符号信号做保号压缩，等价于"温和的 rank"，比 `rank` 保留更多幅度信息。
+
+**调优旋钮（社区共识，按目标选择）：**
+
+| 目标 | 手段 |
+|---|---|
+| 提 Sharpe | `ts_mean` / `ts_decay_linear` 降噪；`rank` / `normalize` 压离群；`group_neutralize` 控行业/区域噪声 |
+| 降换手 | `hump` / `hump_decay` / `trade_when` 延长持仓；`clamp` 截断突变；**加长 lookback**（10→60 明显降 TO） |
+| 提覆盖 | `ts_backfill(x, d)` 用在稀疏的基本面/新闻字段（覆盖率 33%→近 100%）；**切勿用于价格/成交量** |
+| 降 Prod Corr | 选人数少的 category（如 ASI broker）比在拥挤族里换字段有效 |
+
+> ⚠️ 社区帖里写的 `ts_decay_exp_window` 在本账户不可用（实测报
+> `unknown operator "ts_decay_exp_window"`，2026-11-13），降噪请用 `ts_decay_linear`。
+
 ### 4.2 低拥挤字段优先策略
 
 **核心目标**：从源头降低 PROD_CORRELATION 撞墙概率。
