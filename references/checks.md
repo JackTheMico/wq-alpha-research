@@ -286,6 +286,27 @@ alpha 的 `is.checks[]` 里每个 theme 单独一条 `MATCHES_THEMES`，`result`
 USA/D1 的 alpha 永远进不了这个池（它的 turnover/pyramid 主题只会显示 WARNING）。这是过去
 10 条 USA 候选全部白跑的根因。
 
+**三之二、主题作用域可以从 alpha 检查里直接读出来（2026-11-13 实测）**
+
+`/themes`、`/users/self/themes` 依旧 404，但每条 `MATCHES_THEMES` 都自带 theme 定义：
+
+```json
+{"name": "MATCHES_THEMES", "result": "WARNING",
+ "themes": [{"id": "Jypwvg4", "multiplier": 2.0, "name": "EUR/D1 TOPCS1600 Theme"}]}
+```
+
+因此 `python scripts/preflight.py --themes` 能直接列出当前作用域，本账户实测：
+
+```
+EUR/D1/TOPCS1600   x2    PASS     EUR/D1 TOPCS1600 Theme
+EUR/D1             x1.1  PASS     EUR/D1/PV Pyramid Theme
+GLB/D1             x1    WARNING  GLB/D1 Power Pool Nov`26
+```
+
+**挖掘前先跑这条命令，再按它的 region/delay/universe 选字段**；查不到或说不清主题，就先问用户。
+主题已生效（`WARNING`）但方向不对，等于白丢 multiplier：`gate_report` / `preflight` 默认把它当阻断，
+复盘时用 `theme=False` / `--no-theme` 关闭。`WARNING` 与 `PENDING` 的区别是前者主题已生效、后者还没评估。
+
 **四、GLB 区域的数据可用性与 USA 完全不同（踩坑重点）**
 - `analyst4` 在 GLB **不存在** ⇒ **所有 `anl4_*` 字段在 GLB 报 `unknown variable`**。
 - `fundamental6` 在 GLB 只有 197 字段，裸名 `operating_income` / `debt` / `equity` 全部不可用。

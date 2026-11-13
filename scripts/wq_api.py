@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -91,6 +92,70 @@ def duration_blockers(checks: dict) -> list[str]:
             f"（字段可回测天数 < {MIN_DURATION_DAYS}，无法提交）"
         ]
     return []
+
+
+THEME_CHECK = "MATCHES_THEMES"
+
+
+def theme_entries(checks: Sequence[dict]) -> list[dict]:
+    """从 `MATCHES_THEMES` 里抽出 theme 定义（id / multiplier / name）。
+
+    同名检查会出现多次（每个 theme 一条），所以入参必须是**原始列表**，
+    不能先按 name 折叠成 dict——折叠会把 PENDING 与 WARNING 两条压成一条。
+    实测（2026-11-13，alpha RReWar7g）：
+        [{"result": "WARNING", "name": "MATCHES_THEMES",
+          "themes": [{"id": "Jypwvg4", "multiplier": 2.0, "name": "EUR/D1 TOPCS1600 Theme"}]},
+         {"result": "PENDING", "name": "MATCHES_THEMES",
+          "themes": [{"id": "9B3qVP4", "multiplier": 1.0, "name": "GLB/D1 Power Pool Nov`26"}]}]
+    """
+    out: list[dict] = []
+    for check in checks or []:
+        if check.get("name") != THEME_CHECK:
+            continue
+        for theme in check.get("themes") or []:
+            out.append({**theme, "result": check.get("result")})
+    return out
+
+
+def parse_theme_scope(name: str) -> dict:
+    """从 theme 名解析作用域：`EUR/D1 TOPCS1600 Theme` → region/delay/universe。"""
+    scope: dict[str, Any] = {"region": None, "delay": None, "universe": None}
+    if not name:
+        return scope
+    m = re.match(r"([A-Z]{3})\s*/\s*D([01])(?:\s+(TOP[A-Z0-9]*))?", name)
+    if m:
+        scope["region"], scope["delay"] = m.group(1), int(m.group(2))
+        scope["universe"] = m.group(3).upper() if m.group(3) else None
+    return scope
+
+
+def theme_blockers(checks: Sequence[dict]) -> list[str]:
+    """主题未命中：有已生效主题（WARNING/FAIL）且没有任何 PASS。
+
+    `WARNING` 语义是「主题已生效但该 alpha 不在范围内」——不影响提交，
+    但拿不到 multiplier。社区/用户策略是优先挖主题内 alpha，所以本地按阻断处理。
+    """
+    entries = theme_entries(checks)
+    matched = {t.get("id") for t in entries if t.get("result") == "PASS"}
+    out: list[str] = []
+    for t in entries:
+        if t.get("result") not in ("WARNING", "FAIL"):
+            continue
+        if t.get("id") in matched:
+            continue
+        mult = t.get("multiplier")
+        mult_txt = f"（x{mult:g}）" if isinstance(mult, (int, float)) else ""
+        scope = parse_theme_scope(t.get("name") or "")
+        scope_txt = ""
+        if scope["region"]:
+            scope_txt = f" 作用域 {scope['region']}/D{scope['delay']}"
+            if scope["universe"]:
+                scope_txt += f"/{scope['universe']}"
+        out.append(
+            f"主题未命中：{t.get('name')}{mult_txt}{scope_txt} —— "
+            f"该 alpha 不在主题范围内，拿不到 multiplier（挖掘时应优先主题作用域）"
+        )
+    return out
 
 
 def quality_blockers(is_: dict) -> list[str]:
@@ -831,6 +896,39 @@ class BrainSession:
         checks = (alpha.get("is") or {}).get("checks") or []
         return [c.get("name") for c in checks if c.get("result") == "PENDING"]
 
+    def active_themes(self, *, limit: int = 200) -> list[dict]:
+        """当前生效主题及其作用域（region/delay/universe）与 multiplier。
+
+        `/themes`、`/users/self/themes` 仍然 404（2026-11-13 复核），
+        `MATCHES_THEMES` 是唯一窗口：每个 alpha 的 checks 都带 themes 定义。
+        按 theme id 去重，result 取最积极的一个（PASS > WARNING > PENDING）。
+        """
+        rank = {"PASS": 3, "WARNING": 2, "FAIL": 2, "PENDING": 1}
+        themes: dict[str, dict] = {}
+        for status in ("UNSUBMITTED", "ACTIVE"):
+            try:
+                rows = self.alphas(status=status, page_size=100, max_items=limit)
+            except BrainError:
+                continue
+            for alpha in rows:
+                for theme in theme_entries((alpha.get("is") or {}).get("checks") or []):
+                    tid = theme.get("id")
+                    if not tid:
+                        continue
+                    scope = parse_theme_scope(theme.get("name") or "")
+                    prev = themes.get(tid)
+                    if prev is None or rank.get(theme["result"], 0) > rank.get(prev["result"], 0):
+                        themes[tid] = {
+                            "id": tid,
+                            "name": theme.get("name"),
+                            "multiplier": theme.get("multiplier"),
+                            "result": theme.get("result"),
+                            **scope,
+                        }
+        order = {"PASS": 0, "WARNING": 1, "PENDING": 2, "FAIL": 1}
+        return sorted(themes.values(), key=lambda t: (order.get(t["result"], 3),
+                                                      t.get("region") or "", t.get("name") or ""))
+
     def gate_report(
         self,
         alpha: dict,
@@ -838,6 +936,7 @@ class BrainSession:
         delay: Optional[int] = None,
         strict: bool = True,
         quality: bool = True,
+        theme: bool = True,
     ) -> tuple[bool, list[str]]:
         """按顾问级阈值给出可读的提交判定（本地前置检查）。
 
@@ -873,6 +972,17 @@ class BrainSession:
         if quality:
             blockers.extend(quality_blockers(is_))
             notes.extend(quality_notes(is_))
+
+        # 主题：优先挖主题内 alpha，主题外拿不到 multiplier（用户明确要求）
+        if theme:
+            theme_msgs = theme_blockers(is_.get("checks") or [])
+            blockers.extend(theme_msgs)
+            if not theme_msgs:
+                for t in theme_entries(is_.get("checks") or []):
+                    if t.get("result") == "PASS":
+                        notes.append(
+                            f"命中主题 {t.get('name')}（x{t.get('multiplier')}），multiplier 生效"
+                        )
 
         checks = self.checks(alpha)
         for name, check in checks.items():
@@ -1202,6 +1312,7 @@ __all__ = [
     "CONSULTANT_THRESHOLDS",
     "DEFAULT_SETTINGS",
     "GATE_LADDER_MIN_RATIO",
+    "MIN_DURATION_DAYS",
     "QUALITY_FITNESS_GOOD",
     "QUALITY_FITNESS_MIN",
     "QUALITY_MARGIN_GOOD",
@@ -1217,10 +1328,13 @@ __all__ = [
     "field_regions",
     "fields_of_dataset",
     "load_credentials",
+    "parse_theme_scope",
     "print_row",
     "simulate_one",
     "submit_verdict",
     "submit_verdict_checks",
     "submit_verified",
+    "theme_blockers",
+    "theme_entries",
     "to_returns",
 ]

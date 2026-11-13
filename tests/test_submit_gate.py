@@ -241,6 +241,79 @@ class TestDurationGate:
 
 
 # --------------------------------------------------------------------------
+# 1.3 主题闸门：优先挖主题内 alpha（2026-11-13 用户要求）
+# --------------------------------------------------------------------------
+def theme_check(result, *themes):
+    return {"name": "MATCHES_THEMES", "result": result,
+            "themes": [{"id": tid, "multiplier": mult, "name": name}
+                       for tid, mult, name in themes]}
+
+
+class TestThemeGate:
+    def test_parse_scope(self):
+        from wq_api import parse_theme_scope
+
+        assert parse_theme_scope("EUR/D1 TOPCS1600 Theme") == {
+            "region": "EUR", "delay": 1, "universe": "TOPCS1600"}
+        assert parse_theme_scope("GLB/D1 Power Pool Nov`26")["universe"] is None
+
+    def test_unmatched_warning_blocks(self):
+        """实测：EUR/D1 TOPCS1600 主题 x2，alpha 不在范围内 → 拿不到 multiplier。"""
+        from wq_api import theme_blockers
+
+        msgs = theme_blockers([theme_check("WARNING", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))])
+        assert msgs and "EUR/D1 TOPCS1600" in msgs[0] and "x2" in msgs[0]
+
+    def test_pending_theme_does_not_block(self):
+        from wq_api import theme_blockers
+
+        assert theme_blockers([theme_check("PENDING", ("9B3qVP4", 1.0, "GLB/D1 PP"))]) == []
+
+    def test_matched_pass_does_not_block(self):
+        from wq_api import theme_blockers
+
+        assert theme_blockers([theme_check("PASS", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))]) == []
+
+    def test_gate_report_blocks_theme_mismatch(self):
+        brain = BrainSession(username="u", password="p")
+        alpha = make_alpha(checks=[theme_check("WARNING", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))])
+        ok, msgs = brain.gate_report(alpha, delay=1)
+        assert ok is False
+        assert any("主题未命中" in m for m in msgs)
+
+    def test_gate_report_allows_when_theme_off(self):
+        brain = BrainSession(username="u", password="p")
+        alpha = make_alpha(checks=[theme_check("WARNING", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))])
+        ok, _ = brain.gate_report(alpha, delay=1, theme=False)
+        assert ok is True
+
+    def test_preflight_blocks_theme_mismatch(self):
+        res = preflight.evaluate(
+            make_alpha(checks=[theme_check("WARNING", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))]),
+            CONSULTANT_D1,
+        )
+        assert res["verdict"] == "NO-GO"
+        assert any("主题未命中" in b for b in res["blockers"])
+
+    def test_preflight_theme_off_for_review(self):
+        res = preflight.evaluate(
+            make_alpha(checks=[theme_check("WARNING", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))]),
+            CONSULTANT_D1,
+            theme=False,
+        )
+        assert res["verdict"] == "GO"
+
+    def test_render_lists_theme(self):
+        res = preflight.evaluate(
+            make_alpha(checks=[theme_check("PASS", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))]),
+            CONSULTANT_D1,
+        )
+        text = preflight.render(res)
+        assert "主题: EUR/D1 TOPCS1600 Theme" in text
+        assert "x2" in text
+
+
+# --------------------------------------------------------------------------
 # 2. 拥挤度先验
 # --------------------------------------------------------------------------
 class TestCrowdingPrior:

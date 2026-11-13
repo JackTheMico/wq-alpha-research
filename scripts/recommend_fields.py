@@ -22,6 +22,7 @@
   即经典数据集内最近扩充/还没被大量使用的字段。
 
 用法：
+    python scripts/preflight.py --themes                                # 先确认主题作用域
     python scripts/recommend_fields.py --region usa --universe top3000
     python scripts/recommend_fields.py --region gbr --universe top700    # GBR 冷门多
     python scripts/recommend_fields.py --region glb --universe top3000 --refresh
@@ -459,6 +460,29 @@ def main() -> int:
 
     brain = BrainSession(credential_file=str(REPO / "credential.txt"))
     brain.authenticate()
+
+    # 挖掘前先对齐主题：主题外跑出来的 alpha 拿不到 multiplier
+    try:
+        themes = [t for t in brain.active_themes(limit=100)
+                  if t.get("result") in ("PASS", "WARNING")]
+    except Exception:  # 主题查询失败不应阻断挖掘
+        themes = []
+    if themes:
+        scopes = "、".join(
+            f"{t.get('region')}/D{t.get('delay')}"
+            + (f"/{t['universe']}" if t.get("universe") else "")
+            + (f"(x{t['multiplier']:g})" if isinstance(t.get("multiplier"), (int, float)) else "")
+            for t in themes
+        )
+        print(f"当前主题: {scopes}")
+        region, delay, universe = args.region.upper(), args.delay, args.universe.upper()
+        hit = [t for t in themes
+               if t.get("region") == region and t.get("delay") == delay
+               and (not t.get("universe") or t["universe"] == universe)]
+        if not hit:
+            print(f"⚠️ {region}/D{delay}/{universe} 不在任何主题作用域内，"
+                  f"挖出的 alpha 拿不到 multiplier；建议先跑 "
+                  f"`python scripts/preflight.py --themes` 确认主题。")
 
     if args.refresh or not snapshot_exists(args.region, args.universe, args.delay):
         print(f"拉取 {args.region}/{args.universe} delay={args.delay} 字段快照...")

@@ -19,6 +19,9 @@ Sharpe 2.05 / Fitness 2.22 / Margin 65.5‱ 也照样被拒；这一项在 QUICK
 
 用法
 ----
+    # 挖掘前先确认主题作用域（region/delay/universe）
+    python scripts/preflight.py --themes
+
     # 常规：从 alpha id 判定（需要联网，会查拥挤度先验）
     python scripts/preflight.py RREmY1Qe KPJG6Jwj
 
@@ -54,6 +57,8 @@ from wq_api import (  # noqa: E402
     field_availability,
     quality_blockers,
     quality_notes,
+    theme_blockers,
+    theme_entries,
 )
 from static_check import (  # noqa: E402
     BASE_PRICE_FIELDS,
@@ -145,6 +150,7 @@ def evaluate(
     strict: bool = True,
     crowding: Optional[dict] = None,
     quality: bool = True,
+    theme: bool = True,
 ) -> dict:
     """纯函数判定：给定 alpha 与阈值，返回 GO / NO-GO 及全部理由。
 
@@ -185,6 +191,14 @@ def evaluate(
     if quality:
         blockers.extend(quality_blockers(is_))
         warnings.extend(quality_notes(is_))
+
+    # 主题闸门：优先挖主题内 alpha（主题外拿不到 multiplier）
+    themes = theme_entries(is_.get("checks") or [])
+    if theme:
+        blockers.extend(theme_blockers(is_.get("checks") or []))
+        for t in themes:
+            if t.get("result") == "PASS":
+                warnings.append(f"命中主题 {t.get('name')}（x{t.get('multiplier')}）")
 
     # ladder 类：WARNING 不可采信
     ladder: dict[str, dict] = {}
@@ -253,6 +267,7 @@ def evaluate(
             "returns": returns, "drawdown": drawdown, "margin": margin,
         },
         "ladder": ladder,
+        "themes": themes,
         "crowding": crowding,
         "blockers": blockers,
         "warnings": warnings,
@@ -308,6 +323,15 @@ def render(result: dict) -> str:
         lines.append(
             f"  {name}: {info['result']} {info['value']}/{info['limit']}"
         )
+    for t in result.get("themes") or []:
+        scope = ""
+        if t.get("region"):
+            scope = f" [{t['region']}/D{t['delay']}"
+            if t.get("universe"):
+                scope += f"/{t['universe']}"
+            scope += "]"
+        mult = f" x{t['multiplier']:g}" if isinstance(t.get("multiplier"), (int, float)) else ""
+        lines.append(f"  主题: {t.get('name')}{mult}{scope} → {t.get('result')}")
     if result.get("crowding"):
         lines.append(f"  拥挤度先验: {result['crowding']['level'].upper()} — {result['crowding']['detail']}")
         age = result["crowding"].get("min_age_days")
@@ -325,14 +349,41 @@ def render(result: dict) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def render_themes(themes: list[dict]) -> str:
+    """挖掘前先看这张表：主题作用域就是该优先挖的 region/delay/universe。"""
+    if not themes:
+        return "未发现主题（最近 alpha 的 MATCHES_THEMES 为空）"
+    lines = [f"{'=' * 68}", "当前主题（按 MATCHES_THEMES 聚合，PASS > WARNING > PENDING）"]
+    for t in themes:
+        scope = f"{t.get('region') or '?'}/D{t.get('delay') or '?'}"
+        if t.get("universe"):
+            scope += f"/{t['universe']}"
+        mult = f"x{t['multiplier']:g}" if isinstance(t.get("multiplier"), (int, float)) else "x?"
+        lines.append(f"  {scope:<22s} {mult:<5s} {t.get('result'):<8s} {t.get('name')}")
+    lines.append("挖掘时优先以上作用域；换 region/universe 前先确认主题，别在主题外白跑。")
+    return "\n".join(lines)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="提交前硬闸门：GO / NO-GO 判定")
     ap.add_argument("alpha_ids", nargs="*", help="alpha id 列表")
     ap.add_argument("--from-json", help="从研究脚本落盘的 JSON 里取 alpha_id")
     ap.add_argument("--no-strict", action="store_true", help="不把 ladder WARNING 当阻断（仅复盘用）")
+    ap.add_argument("--no-theme", action="store_true", help="不把主题未命中当阻断（仅复盘用）")
     ap.add_argument("--skip-crowding", action="store_true", help="不查拥挤度（省请求）")
+    ap.add_argument("--themes", action="store_true", help="只列出当前主题作用域后退出")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     args = ap.parse_args(argv)
+
+    if args.themes:
+        brain = BrainSession()
+        brain.authenticate()
+        themes = brain.active_themes()
+        if args.json:
+            print(json.dumps(themes, ensure_ascii=False, indent=2))
+        else:
+            print(render_themes(themes))
+        return 0 if themes else 1
 
     ids = list(args.alpha_ids)
     if args.from_json:
@@ -354,7 +405,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         delay = int((alpha.get("settings") or {}).get("delay", 1))
         crowding = None if args.skip_crowding else collect_crowding(brain, alpha)
         results.append(
-            evaluate(alpha, brain.thresholds(delay), strict=not args.no_strict, crowding=crowding)
+            evaluate(alpha, brain.thresholds(delay), strict=not args.no_strict,
+                     crowding=crowding, theme=not args.no_theme)
         )
 
     if args.json:
