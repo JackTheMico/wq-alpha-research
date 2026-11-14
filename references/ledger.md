@@ -349,3 +349,31 @@ LOW_DURATION       = 50 / 500     ← 真凶
 `d150`（`npab9Qj3`）：S 1.41 < 1.58、F 1.17（过平台 1.0，但 < 质量线 2.0）、DD 13.3% > Ret 8.6%。
 **这是目前 Margin 最充裕的一条（120‱，是质量线 10‱ 的 12 倍）**，差的是收益幅度而非成本覆盖。
 下一步该找一个「高收益率腿」与它互补（而不是继续在同一族里加 decay）。
+
+## 9. EUR/TOPCS1600 的低相关候选（2026-11-14）
+
+以 `anl15_bps_gr_18_m_mean`（decay150, `npab9Qj3`）为基准，筛非 analyst15/7/10 的冷字段做 PnL 相关性检测：
+
+| 字段 | 数据集 | S | Margin | 与基准 corr |
+|---|---|---:|---:|---:|
+| anl4_rd_exp_flag | analyst4 | 0.32 | 27.1‱ | 0.02 |
+| debt_st | fundamental23 | 0.29 | 26.8‱ | 0.00 |
+| anl69_roe_best_crncy_iso | analyst69 | 0.18 | 25.6‱ | 0.03 |
+| anl9_scaleconversionflag | analyst9 | 0.09 | 35.0‱ | 0.03 |
+| debt_lt_curr / cost_of_revenue | fundamental23 | -0.29 / -0.68 | 负 | 0.04 / 0.02 |
+
+24 个候选的 |corr| **全部 ≤ 0.11**——相关性上完美，但 **Sharpe 最高只有 0.32**，没有一条能把基准从 1.41 推到 1.58。
+
+### 9.1 结构性约束：主题宇宙里可提交的字段只剩 analyst 族
+
+| 数据集 | 冷字段数（MATRIX cov≥0.5 α≤50） | 年龄 | 可提交 |
+|---|---:|---|---|
+| analyst15 | 1,719 | 1658d+ | ✅ |
+| analyst7 | 1,048 | 1658d+ | ✅ |
+| analyst10 | 588 | 865d | ✅ |
+| analyst11 / 4 / 69 / 14 / 9 | 309 / 349 / 153 / 114 / 56 | 500d+ | ✅（信号弱） |
+| fundamental17 / 23 | 354 / 156 | 部分 1658d | ✅（信号弱） |
+| **pv20 / pv30 / model26 / model50 / predictive_starmine / continuation_score / multifactor_return_pred / intraday_pv_feats / pattern_scores** | **30 / 31 / 144 / 65 / 222 / 272 / 89 / 156 / 156** | **227–409d** | ❌ 全部卡 LOW_DURATION |
+
+**含义：想在 TOPCS1600 里找高收益腿，目前没有可用字段。** 价量/模型/短周期这几族（共 1,165 个冷字段）要等 3–9 个月跨过 500 天才可用，
+届时才是「高收益腿 + analyst15 高 Margin 腿」组合的正确时机。
