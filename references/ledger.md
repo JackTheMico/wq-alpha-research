@@ -447,3 +447,56 @@ DD 7.6% < Ret 7.7%、Margin 79.5‱、数据 1658 天。唯一未过的是本地
    WARNING（`GLB/D1 Power Pool` x1）。WARNING 只是「那条主题不适用」，命中任一主题即应放行。
 3. **低换手族提交需显式 `--no-quality`**：Fitness 2.0 线结构性不可达（见上），
    等价判据是 Margin ≥ 30‱ 且 DD < Ret。
+
+## 11. EUR/TOPCS1600 的第二条 alpha：2Y ladder 是硬约束（2026-11-14）
+
+### 11.1 扫描结论：除 anl15 外，所有字段族的 2Y Sharpe 都在 0.1–1.1
+
+全量扫过 analyst4 / analyst7 / analyst10 / analyst11 / analyst15 / analyst39 / analyst69、
+fundamental17 / fundamental23 / pv1 后，`LOW_2Y_SHARPE`（= 提交时的 `IS_LADDER_SHARPE`）
+只有两个字段族能过 1.58：
+
+| 腿 | 全期 S | 2Y Sharpe | 结论 |
+|---|---:|---:|---|
+| `anl15_bps_gr_18_m_mean` | 1.12 | **1.73** | 唯一稳定过线 |
+| `anl15_bps_gr_cal_fy3_mean` | 1.00 | 1.54 | 擦线，单腿不过 |
+| `est_12m_ebt_raised_1wk` | 1.20 | 0.15 | 近两年衰减 |
+| `est_12m_sal_raised_1wk` | 1.26 | 0.43 | 同上 |
+| `anl69_best_eeps_nxt_yr` | 0.84 | 1.06 | 不够 |
+| `cashflow_op/assets` | 1.28 | 0.95 | 不够 |
+| `anl4_af_eps_mean` | 0.75 | 0.62 | 不够 |
+| `fundamental17` 全族（EV/EBITDA、毛利、周转…） | ≤0.66 | 全部为负 | 全灭 |
+
+**推论（硬约束）**：`vRAa38Jb` 已占住 anl15 的 0.62 权重。任何新 alpha 要过 2Y ladder，
+anl15 权重大约需要 ≥ 0.5；而 anl15 权重 0.5 时与 `vRAa38Jb` 的日收益相关已是 **0.69**，
+再高就会撞 `SELF_CORRELATION 0.7`。**2Y 过线与自相关过线在这个主题内只能同时满足于一个极窄的点。**
+
+### 11.2 可用候选：0.5*anl15 + 0.5*CFO/Assets（FULL `mLae5RXp`）
+
+```
+group_neutralize(0.5*zscore(vector_neut(ts_mean(anl15_bps_gr_18_m_mean,20), ts_mean(...,250)))
+               + 0.5*zscore(vector_neut(ts_mean(cashflow_op/assets,20), ts_mean(...,250))), country)
+EUR/TOPCS1600/d1 · MARKET · decay=150 · truncation=0.05
+```
+
+| 指标 | 值 |
+|---|---|
+| Sharpe | 1.62 |
+| Fitness | 1.40 |
+| Turnover | 1.86% |
+| Margin | 100.9‱ |
+| Returns / Drawdown | 9.37% / 12.79%（**DD > Ret**） |
+| IS_LADDER_SHARPE | **PASS 1.63 / 1.58** |
+| 主题 | PASS x2.1（TOPCS1600 x2 + FUNDAMENTAL Pyramid x1.1） |
+| 与 vRAa38Jb 相关 | **0.692**（距 0.7 仅 0.008） |
+
+调参边界（FULL 实测）：decay=100 → ladder **1.57 FAIL**（`vRAajErA`）；
+0.45/0.55 → ladder **1.55 FAIL**（`A1xq0GXw`）。50/50 + decay150 是唯一过线组合，
+不要随意改权重或 decay。DD 12.8% 是该组合的固有代价，trunc 0.02/0.03 能把 DD 压到 9.7–10.8%，
+但 S 同时跌到 1.54–1.57（不过线），无解。
+
+### 11.3 副产品：CFO/Assets 是本主题内最有价值的新核心
+
+`cashflow_op/assets` 单腿 S 1.28 / Margin 61‱ / 与 `vRAa38Jb` 相关 0.16，
+但 2Y 0.95，只能作为「配重」使用。凡是 2Y 弱的强腿（ebt 1.20、sal 1.26、net 1.17、a69 0.84），
+与它混到 S 1.6+ 很容易，但 ladder 一定崩——**今后在 EUR 主题内筛选，先看 2Y，再看 Sharpe**。
