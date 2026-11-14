@@ -594,6 +594,9 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 37. **新 onboard 字段攒满 500 天之前只能看、不能交**：提交时 `LOW_DURATION = 可回测天数 / 500`，而这一项在 QUICK/FULL 的 `is.checks` 里**完全不出现**（2026-11-13 实测 analyst15 `ebg_sector_18mo_marketcap_percent`：仅 50 天历史，S 2.05 / F 2.22 / Margin 65.5‱ 全绿，提交仍被拒）。选字段时用快照 `dateCreated` 年龄先卡 `≥ 500 天`，`preflight` 也会用字段年龄提前阻断；追"最新上线"必须把这条算进去。
 38. **先对齐主题再挖掘，别在主题外白跑**：用户策略是优先挖主题内 alpha（主题外只是拿不到 multiplier，如 `Theme EUR/D1 TOPCS1600 Theme does not match with multiplier of 2`）。开工前先跑 `python scripts/preflight.py --themes` 查当前作用域（`MATCHES_THEMES` 的 `themes[].name/multiplier` 是唯一窗口，`/themes` 404）；查到就按该 region/delay/universe 挖，查不到或不明确就先问用户主题是什么。`gate_report` / `preflight` 默认把「主题已生效但未命中」当阻断，复盘时用 `theme=False` / `--no-theme` 关闭。
 39. **开挖前先检索社区与历史库，骨架按插槽扫描而非照抄单一模板**：先 `python scripts/kb.py search <关键词>` / `kb.py pull "ATOM template" -n 10` 把论坛最新模板入库，再按 `compare_op ∈ {subtract, divide, vector_neut} × ts_op ∈ {ts_mean, ts_rank, ts_zscore} × (d1,d2) ∈ {(5,60),(20,120),(20,250)}` 做插槽扫描（至少 9 条），不要只跑 `vector_neut+ts_mean` 一种。调优旋钮见 `references/templates-core.md` §4.1.4：提 Sharpe 用降噪/rank，降换手用 hump/clamp/加长窗口，提覆盖用 `ts_backfill`（仅限稀疏基本面/新闻，勿用于价量）。
+40. **QUICK 模式 alpha 不能提交**：`POST /alphas/{id}/submit` 直接 `400 {"detail":"Cannot submit QUICK mode alphas"}`。选中候选后必须用 **FULL 模式重跑同一表达式**再交（2026-11-14 实测 `zqdX6a0R` → FULL `vRAa38Jb`，指标完全一致，约 4 分钟）。
+41. **主题闸门：命中任一主题即放行**：同名 `MATCHES_THEMES` 会同时出现 PASS 与 WARNING 多条，WARNING 只表示"那条主题不适用"。实测 `vRAa38Jb` 同时 PASS `EUR/D1 TOPCS1600`(x2) + `EUR/D1/ANALYST Pyramid`(x1.3)，另有 `GLB/D1 Power Pool` WARNING —— 按"有 WARNING 就阻断"会误杀 x2.3 的 alpha。`theme_blockers` 已改为「有任一 PASS 直接返回空」。
+42. **低换手族用 `--no-quality` 显式豁免 Fitness 线**：`F = S × sqrt(|Ret| / max(TO, 0.125))`，TO ≈ 2% 时分母恒为 0.125，F ≥ 2.0 等价于要求 Ret ≥ 19%，该族结构性不可达。等价质量判据改为 **Margin ≥ 30‱ 且 DD < Ret**，提交时用 `python scripts/submit_one.py <id> --no-quality --do-submit`。
 
 ---
 

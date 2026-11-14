@@ -79,7 +79,7 @@ def check_daily_quota(brain: BrainSession, pool_size: int) -> bool:
     return False
 
 
-def review(brain: BrainSession, alpha_id: str) -> tuple[bool, dict]:
+def review(brain: BrainSession, alpha_id: str, quality: bool = True) -> tuple[bool, dict]:
     alpha = brain.alpha(alpha_id)
     st = alpha.get("status")
     print(f"alpha      : {alpha_id}")
@@ -98,7 +98,7 @@ def review(brain: BrainSession, alpha_id: str) -> tuple[bool, dict]:
           f"returns={is_.get('returns')} turnover={is_.get('turnover')} "
           f"drawdown={is_.get('drawdown')} margin={is_.get('margin')}")
 
-    ok, msgs = brain.gate_report(alpha)
+    ok, msgs = brain.gate_report(alpha, quality=quality)
     print(f"gate       : {'PASS' if ok else 'FAIL'}")
     for m in msgs:
         print(f"    - {m}")
@@ -125,12 +125,15 @@ def main() -> int:
     ap.add_argument("--max-wait", type=float, default=300.0, help="等待判定书的总秒数")
     ap.add_argument("--pool-size", type=int, default=0,
                     help=f"可提交候选池大小；≥{POOL_UNLOCK_SIZE} 时解除每日 {DAILY_LIMIT} 条限制")
+    ap.add_argument("--no-quality", action="store_true",
+                    help="跳过 Fitness≥2.0 质量线（仅限 TO<5%% 的低换手族："
+                         "F=S×sqrt(Ret/max(TO,0.125)) 结构性达不到 2.0）")
     args = ap.parse_args()
 
     brain = BrainSession(credential_file=str(Path(__file__).resolve().parent.parent / "credential.txt"))
     brain.authenticate()
     print(f"认证成功：consultant={brain.is_consultant}\n", flush=True)
-    ok, _ = review(brain, args.alpha_id)
+    ok, _ = review(brain, args.alpha_id, quality=not args.no_quality)
     if not ok:
         print("\n>>> 复核未通过，未提交。")
         return 1

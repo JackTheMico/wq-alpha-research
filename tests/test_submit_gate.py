@@ -274,6 +274,21 @@ class TestThemeGate:
 
         assert theme_blockers([theme_check("PASS", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))]) == []
 
+    def test_pass_plus_other_warning_does_not_block(self):
+        """实测 2026-11-14 alpha vRAa38Jb：命中 EUR/D1 TOPCS1600(x2) + ANALYST Pyramid(x1.3)，
+        另一条 GLB/D1 Power Pool 只是 WARNING（不适用）→ 已拿到 x2.3，不应阻断。"""
+        from wq_api import theme_blockers
+
+        checks = [
+            theme_check(
+                "PASS",
+                ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"),
+                ("3yYPpw4", 1.3, "EUR/D1/ANALYST Pyramid Theme"),
+            ),
+            theme_check("WARNING", ("9B3qVP4", 1.0, "GLB/D1 Power Pool Nov`26")),
+        ]
+        assert theme_blockers(checks) == []
+
     def test_gate_report_blocks_theme_mismatch(self):
         brain = BrainSession(username="u", password="p")
         alpha = make_alpha(checks=[theme_check("WARNING", ("Jypwvg4", 2.0, "EUR/D1 TOPCS1600 Theme"))])

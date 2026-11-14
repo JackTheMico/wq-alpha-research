@@ -426,3 +426,24 @@ DD 7.6% < Ret 7.7%、Margin 79.5‱、数据 1658 天。唯一未过的是本地
 > **Fitness 对低换手 alpha 结构性不可达**：平台公式 `F = Sharpe × sqrt(|Ret| / max(TO, 0.125))`，
 > 当 TO ≈ 2% 时 `F = S × sqrt(Ret/0.125)`，要 F≥2.0 需 Ret ≈ 19%（当前 7.7%）。
 > 即这条 2.0 质量线对低换手族等同于「Ret ≥ 19%」，应改用 Margin ≥ 30‱ + DD < Ret 作为该族的等价质量判据。
+
+### 10.4 提交实录：QUICK → FULL 复跑 + 主题 PASS 放行（2026-11-14）
+
+| 步骤 | alpha | 结果 |
+|---|---|---|
+| QUICK 直接提交 | `zqdX6a0R` | ❌ `400 {"detail":"Cannot submit QUICK mode alphas"}` |
+| FULL 复跑同表达式 | `vRAa38Jb` | 指标与 QUICK **完全一致**（S 1.62 / F 1.27 / TO 1.94% / Margin 79.5‱ / DD 7.58% < Ret 7.72%），约 4 分钟 |
+| 提交 | `vRAa38Jb` | ✅ `ACTIVE`，`dateSubmitted=2026-11-14` |
+
+提交后回算：`SELF_CORRELATION 0.1935`、`PROD_CORRELATION 0.5421`（均 PASS）；
+`LOW_SHARPE 1.62/1.58`、`IS_LADDER_SHARPE 2.02/2.02`、`LOW_SUB_UNIVERSE_SHARPE 1.5/0.86` 全 PASS，
+`CLUSTER_TEST 1.57/1.58` WARNING（差 0.01）。
+
+三条经验：
+
+1. **QUICK 模式 alpha 一律不能提交**，必须用 FULL 重跑（指标可复现，不会漂移）。
+2. **主题闸门不能「有 WARNING 就阻断」**：本 alpha 的 `MATCHES_THEMES` 同时有
+   PASS（`EUR/D1 TOPCS1600` x2 + `EUR/D1/ANALYST Pyramid` x1.3 = x2.3）与
+   WARNING（`GLB/D1 Power Pool` x1）。WARNING 只是「那条主题不适用」，命中任一主题即应放行。
+3. **低换手族提交需显式 `--no-quality`**：Fitness 2.0 线结构性不可达（见上），
+   等价判据是 Margin ≥ 30‱ 且 DD < Ret。

@@ -137,11 +137,14 @@ def theme_blockers(checks: Sequence[dict]) -> list[str]:
     """
     entries = theme_entries(checks)
     matched = {t.get("id") for t in entries if t.get("result") == "PASS"}
+    # 命中任一主题即放行：其他主题的 WARNING 只是「那条主题不适用」，不影响已拿到的 multiplier。
+    # 实测 2026-11-14 alpha vRAa38Jb：EUR/D1 TOPCS1600(x2) + EUR/D1/ANALYST Pyramid(x1.3) PASS，
+    # 同时 GLB/D1 Power Pool WARNING —— 若按「有 WARNING 就阻断」会误杀 x2.3 的 alpha。
+    if matched:
+        return []
     out: list[str] = []
     for t in entries:
         if t.get("result") not in ("WARNING", "FAIL"):
-            continue
-        if t.get("id") in matched:
             continue
         mult = t.get("multiplier")
         mult_txt = f"（x{mult:g}）" if isinstance(mult, (int, float)) else ""
