@@ -495,6 +495,16 @@ EUR/TOPCS1600/d1 · MARKET · decay=150 · truncation=0.05
 不要随意改权重或 decay。DD 12.8% 是该组合的固有代价，trunc 0.02/0.03 能把 DD 压到 9.7–10.8%，
 但 S 同时跌到 1.54–1.57（不过线），无解。
 
+### 11.2.1 实测：本地相关低估平台 SELF_CORRELATION 约 0.015
+
+- `mLae5RXp`（50/50, decay150）本地 PnL 相关 **0.692** → 提交判定 `SELF_CORRELATION=0.7074`，**403 拒绝**（失败不消耗当日额度）。
+- 降 anl15 权重救相关时 ladder 立刻掉：0.47→1.57 FAIL、0.48→1.58 FAIL（差 0.001）、0.46→1.56 FAIL。
+- **可行解是「降权重 + 提 decay」**：`0.48*anl15 + 0.52*CFO`、**decay=200**（`6XM3GqWp`）→
+  S 1.61 / F 1.40 / TO 1.74% / Margin 109‱ / ladder **PASS 1.62/1.61** / 本地相关 0.669，
+  提交判定 `SELF_CORRELATION=0.6808` **ACTIVE**（2026-11-14）。
+- 经验：想同时压相关和保 ladder，**动 decay 比动权重安全**（decay 100→200 只抬 ladder 不抬相关）；
+  本地相关要留 ≥0.02 余量，平台口径比本地高约 0.015。
+
 ### 11.3 副产品：CFO/Assets 是本主题内最有价值的新核心
 
 `cashflow_op/assets` 单腿 S 1.28 / Margin 61‱ / 与 `vRAa38Jb` 相关 0.16，
