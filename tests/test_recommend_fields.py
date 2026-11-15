@@ -88,10 +88,14 @@ class TestIsBlueSea:
         f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(50))
         assert not is_blue_sea(f)
 
-    def test_too_old_field_fails(self):
-        """距今 > 1095 天 → 不在冷门窗口内"""
+    def test_old_field_still_passes(self):
+        """2026-11-15 修正：年龄不设上限。
+
+        旧默认 1095 天上限没有实证依据（平台唯一硬约束是 >=500 天下限），
+        代价是成批误杀——GLB/TOP3000 实测 141 字段 → 3897 字段。
+        """
         f = _field("x", alphaCount=5, coverage=0.9, dateCreated=_recent_days(1200))
-        assert not is_blue_sea(f)
+        assert is_blue_sea(f)
 
     def test_high_alpha_fails(self):
         """αCount > 100 → 不算冷门"""
@@ -114,7 +118,7 @@ class TestIsBlueSea:
     def test_custom_thresholds(self):
         """自定义 days_max / alpha_max / min_age"""
         f = _field("x", alphaCount=80, coverage=0.9, dateCreated=_recent_days(600))
-        # 默认 500–1095d + 100α → pass
+        # 默认 >=500d（无上限）+ 100α → pass
         assert is_blue_sea(f)
         # 改严 → fail
         assert not is_blue_sea(f, days_max=400, alpha_max=50)
@@ -144,7 +148,7 @@ class TestFilterFields:
             # 新但较热
             _field("new_hot", alphaCount=800, coverage=0.95, dataset="pv1",
                    dateCreated=_recent_days(560)),
-            # 旧但冷（超出 1095 天窗口）
+            # 旧但冷（年龄不设上限，故仍入选）
             _field("old_cold", alphaCount=50, coverage=0.7, dataset="fundamental6",
                    dateCreated=_recent_days(1200)),
             # 旧且热
@@ -171,9 +175,9 @@ class TestFilterFields:
         ids = [f["id"] for f in result]
         # bad_mapping / vec_field / low_cov / rank_score 被通用闸门排除
         # too_young 被 500 天提交底线排除
-        # old_hot / old_cold 因超过 1095 天窗口被排除
+        # old_hot 因 αCount 太高排除；old_cold 不再被年龄上限排除（2026-11-15 起无上限）
         # new_hot 因 αCount 太高被 αCount 闸门排除
-        assert set(ids) == {"mature_cold_1", "mature_cold_2"}
+        assert set(ids) == {"mature_cold_1", "mature_cold_2", "old_cold"}
         # 按时间升序
         assert result[0]["id"] == "mature_cold_1"  # 520 天前
 

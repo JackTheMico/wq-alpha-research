@@ -9,12 +9,16 @@
   `ebg_sector_18mo_marketcap_percent` 只有 50 天可回测历史，ATOM 单腿
   Sharpe 2.05 / Fitness 2.22 / Margin 65.5‱ 全部达标，提交时仍被
   `LOW_DURATION = 50 / 500` 拒掉。**新 onboard 字段在攒满 500 天数据前
-  只能看、不能变现。** 因此默认过滤掉上线不足 500 天的字段，把「新」的
-  定义退到 500–1095 天这个区间：历史够提交、alphaCount 又还没起来。
+  只能看、不能变现。** 因此默认过滤掉上线不足 500 天的字段。
 
-  这类字段仍具备三大优势：
-  ① Prod Correlation 较低（先发优势）
-  ② Dynamic Pyramid 倍率较高（冷门金字塔常 1.3x–1.8x）
+  但**不设年龄上限**（2026-11-15 修正）：旧默认 1095 天上限没有实证依据，
+  代价是砍掉绝大部分供给——GLB/TOP3000 实测从 141 字段 / 2 数据集（analyst10
+  独占 95 个）扩到 3897 字段 / 8 数据集。候选集中在单一数据集时，产出的 ATOM
+  彼此高度同源，会成批撞 SELF_CORRELATION。**「新」只用来排序，不用来筛除。**
+
+  这类字段的三大预期优势（②为经验估算，非平台返回值，勿当事实引用）：
+  ① Prod Correlation 较低（先发优势，未逐字段验证）
+  ② Dynamic Pyramid 倍率较高（估算公式 1.0+0.8·exp(-αCount/30)，社区观测）
   ③ ATOM 模板（vector_neut + ts_mean）二阶结构即可直接过检
 
 降级策略：
@@ -26,7 +30,7 @@
     python scripts/recommend_fields.py --region usa --universe top3000
     python scripts/recommend_fields.py --region gbr --universe top700    # GBR 冷门多
     python scripts/recommend_fields.py --region glb --universe top3000 --refresh
-    python scripts/recommend_fields.py --region usa --universe top3000 --days 1095 --max-alpha 50
+    python scripts/recommend_fields.py --region usa --universe top3000 --days 730 --max-alpha 50
     python scripts/recommend_fields.py --region usa --universe top3000 --mode vf      # VF 兜底
     python scripts/recommend_fields.py --region usa --universe top3000 --min-age 0    # 含不可提交的新字段
 """
@@ -78,7 +82,11 @@ ATOM_EXCLUDE_KEYWORDS = {
 
 # 蓝海闸门默认值
 MIN_SUBMITTABLE_DAYS = 500      # 平台 LOW_DURATION 下限：不足 500 天的字段提交必拒
-BLUESEA_DAYS_MAX = 1095         # onboard 时间窗口：3 年内（在可提交区间里挑较新的）
+BLUESEA_DAYS_MAX = 36500        # onboard 时间窗口上限：实际不设限（100 年）
+#   旧值 1095（3 年）已废弃：它没有任何实证依据——平台唯一的硬约束是 >=500 天下限，
+#   而上限会砍掉绝大部分供给。2026-11-15 实测 GLB/TOP3000：
+#   days_max=1095 → 141 字段 / 2 数据集（analyst10 占 95）；
+#   days_max=36500 → 3897 字段 / 8 数据集。单数据集池会让所有 ATOM 互相高相关。
 BLUESEA_ALPHA_MAX = 100         # alphaCount 上限
 BLUESEA_COV_MIN = 0.5           # 覆盖度下限
 
@@ -161,6 +169,7 @@ def is_blue_sea(f: dict, *, days_max: float = BLUESEA_DAYS_MAX,
     """可提交的冷门字段：历史够长 + 低 alphaCount + MATRIX + 覆盖够 + 非低质量。
 
     `min_age` 对应平台 `LOW_DURATION` 下限——历史不足 500 天的字段再漂亮也提交不了。
+    `days_max` 默认不设限（36500 天）：上限只会砍供给，不解决任何已知闸门。
     """
     if is_low_quality(f):
         return False
@@ -189,6 +198,11 @@ def _pyramid_multiplier(alpha_count: int) -> float:
 
     用指数衰减模型近似：multiplier = 1.0 + 0.8 × exp(-alphaCount / 30)
     这样：αCount=0 → 1.8x；αCount=10 → 1.57x；αCount=50 → 1.14x；αCount=200 → 1.003x
+
+    ⚠️ 这是**估算值，不是平台返回值**，未经本账户实测标定，只能用于排序参考。
+    字段快照里的 `pyramidMultiplier`（GLB 主流 1.4、pv1 全体 1.0）才是平台原值。
+    另据 ledger §4.1，低 αCount 数据集单腿普遍 CLOSED（S ≤ 0.68），
+    「低 αCount = 高倍率 = 值得挖」这条因果链不成立，不要据此下注。
     """
     return round(1.0 + 0.8 * math.exp(-alpha_count / 30.0), 2)
 
@@ -443,7 +457,8 @@ def main() -> int:
     )
     ap.add_argument(
         "--days", type=int, default=BLUESEA_DAYS_MAX,
-        help=f"bluesea 模式 onboard 时间窗口上限（默认 {BLUESEA_DAYS_MAX} 天）",
+        help=(f"bluesea 模式 onboard 时间窗口上限（默认 {BLUESEA_DAYS_MAX} 天 ≈ 不设限）。"
+              "只有下限 500 天是平台硬约束，上限仅用于按偏好收窄"),
     )
     ap.add_argument(
         "--max-alpha", type=int, default=BLUESEA_ALPHA_MAX,
