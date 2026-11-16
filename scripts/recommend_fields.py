@@ -27,6 +27,7 @@
 
 用法：
     python scripts/preflight.py --themes                                # 先确认主题作用域
+    python scripts/recommend_fields.py --theme                          # 自动选倍率最高的主题作用域
     python scripts/recommend_fields.py --region usa --universe top3000
     python scripts/recommend_fields.py --region gbr --universe top700    # GBR 冷门多
     python scripts/recommend_fields.py --region glb --universe top3000 --refresh
@@ -439,12 +440,32 @@ def _format_field_table(
 # main
 # ---------------------------------------------------------------------------
 
+def pick_theme_scope(themes: list[dict]) -> dict | None:
+    """从活跃主题中挑「倍率最高且作用域完整」的那个。
+
+    只取 result=PASS（WARNING 表示该主题已生效但不适用）且能解析出 region+universe 的条目；
+    Pyramid 类主题（`EUR/D1/ANALYST Pyramid Theme`）解析不出 universe，跳过——
+    它们的命中靠字段 category，跟随区域主题一起被覆盖。
+    """
+    pool = [t for t in themes
+            if t.get("region") and t.get("universe") and t.get("result") == "PASS"]
+    if not pool:
+        pool = [t for t in themes if t.get("region") and t.get("universe")]
+    if not pool:
+        return None
+    return max(pool, key=lambda t: (t.get("multiplier") or 0))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="字段推荐引擎（可提交的冷门字段优先）"
     )
-    ap.add_argument("--region", required=True, help="区域，如 usa/gbr/eur/glb")
-    ap.add_argument("--universe", required=True, help="宇宙，如 top3000/top700/top2500")
+    ap.add_argument(
+        "--theme", action="store_true",
+        help="不指定 region/universe，自动取当前倍率最高的主题作用域（推荐；主题外挖掘拿不到 multiplier）",
+    )
+    ap.add_argument("--region", help="区域，如 usa/gbr/eur/glb")
+    ap.add_argument("--universe", help="宇宙，如 top3000/top700/top2500")
     ap.add_argument("--delay", type=int, default=1)
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--json", action="store_true")
@@ -482,6 +503,28 @@ def main() -> int:
                   if t.get("result") in ("PASS", "WARNING")]
     except Exception:  # 主题查询失败不应阻断挖掘
         themes = []
+
+    if args.theme:
+        if not themes:
+            print("❌ --theme 需要活跃主题，但当前查不到任何主题。"
+                  "先跑 `python scripts/preflight.py --themes`，"
+                  "或改用 --region/--universe 显式指定。")
+            return 2
+        chosen = pick_theme_scope(themes)
+        if chosen is None:
+            print("❌ 活跃主题里没有可解析出 region+universe 的条目；"
+                  "请用 --region/--universe 显式指定。")
+            return 2
+        args.region = (chosen["region"] or "").lower()
+        args.universe = (chosen["universe"] or "").lower()
+        args.delay = chosen.get("delay") or args.delay
+        print(f"已按主题选定作用域: {chosen.get('name')} → "
+              f"{args.region.upper()}/D{args.delay}/{args.universe.upper()} "
+              f"(x{chosen.get('multiplier')})")
+
+    if not args.region or not args.universe:
+        ap.error("缺少 --region / --universe；或用 --theme 自动跟随当前主题作用域")
+
     if themes:
         scopes = "、".join(
             f"{t.get('region')}/D{t.get('delay')}"

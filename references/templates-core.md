@@ -176,11 +176,15 @@ rank(ts_rank(comprehensive_income_net_tax / sales * sales / assets, 126))
 | 插槽 | 可选 | 说明 |
 |---|---|---|
 | `compare_op` | `subtract` / `divide` / `vector_neut` | 三种都是合法的 ATOM 二阶结构；`divide` 在 EUR/USA 实测有信号 |
-| `ts_op` | `ts_mean` / `ts_rank` / `ts_zscore` | `ts_rank` 把信号压到 0–1，天然抗离群；`ts_zscore` 做标准化 |
-| `(d1, d2)` | `(5,60)` / `(20,120)` / `(20,250)` | 社区常用三组；窗口越长换手越低 |
+| `ts_op` | `ts_mean` / `ts_rank` / `ts_zscore` / **`ts_delta`** | `ts_rank` 把信号压到 0–1，天然抗离群；`ts_zscore` 做标准化；**`ts_delta` 是唯一能解开换手死锁的算子（见 §4.1.5）** |
+| `(d1, d2)` | `(5,60)` / `(20,120)` / `(20,250)` / **(20,63)** / **(63,252)** | 社区常用三组；窗口越长换手越低。**`ts_delta` 只需一个窗口：`ts_delta(F,63)` / `ts_delta(F,126)`** |
 
 **因此同一字段至少应做 3×3 的插槽扫描（9 条），而不是只跑 `vector_neut + ts_mean` 一种。**
 本文 §6 实测：`analyst10` 族只用 `vector_neut+ts_mean` 时上限 Fitness 0.83；`divide`/`ts_rank` 是尚未试过的插槽。
+
+> ⚠️ **2026-11-15 的重要补充：上表缺了 `ts_delta`，而它才是换手的开关。**
+> 双平滑结构（`ts_mean` 两次相减）在慢变量上有物理性换手死锁（TO 恒 2–5%），
+> 补上 `ts_delta` 这一格之后才打开（TO 3.9%→13.8%，同时 S/F 双升）。详见 §4.1.5。
 
 **单字段非线性放大（ASI broker 模板，96 赞）：**
 
@@ -202,6 +206,37 @@ ts_mean(-signed_power(ts_entropy(vec_sum(brk1_conviction_flag), 144), 0.618), 12
 
 > ⚠️ 社区帖里写的 `ts_decay_exp_window` 在本账户不可用（实测报
 > `unknown operator "ts_decay_exp_window"`，2026-11-13），降噪请用 `ts_decay_linear`。
+
+#### 4.1.5 骨架对照扫描：`ts_delta` 解开换手死锁（2026-11-16 实测，7 骨架）
+
+**场景**：ATOM 单腿卡在「S 0.5 上下、TO 2–5%」。第一反应通常是换字段，但错的是骨架。
+
+固定字段（短期债务/市值）、固定设置（decay 0 / MARKET / trunc 0.08），只换骨架：
+
+| 编号 | 骨架 | S | F | TO |
+|---|---|---:|---:|---:|
+| 基线 | `group_neutralize(vector_neut(ts_mean(F,20), ts_mean(F,250)), country)` | 0.56 | 0.39 | 3.9% |
+| **T1** | `group_neutralize(rank(ts_delta(F,63)), country)` | **0.63** | **0.48** | **13.8%** |
+| T3 | `ts_delta(ts_mean(F,20), 63)` | 0.48 | 0.33 | 5.5% |
+| T6 | `0.6·慢腿 + 0.4·(-ts_rank(returns,252))` | 0.49 | 0.10 | 71.9% |
+| T7 | `0.7·ts_delta(F,63) + 0.3·(-ts_rank(returns,252))` | 0.16 | 0.02 | 51.1% |
+| T4 | `group_rank(F, subindustry)` | 0.14 | 0.03 | 2.1% |
+| T2 | `ts_zscore(F,250)` | 0.02 | 0.00 | 8.8% |
+| T5 | `ts_rank(F,250)-0.5` | −0.05 | −0.01 | 9.8% |
+
+**三条可复用规律**：
+
+1. **换手由骨架决定，分数由字段决定。** 换字段不会动 TO（同骨架 8 个字段 TO 全在 7%–18%），
+   换骨架才会（2.1%–71.9%）。⇒ 卡换手改骨架，卡分数换字段，别混着试。
+2. **"T3 = T1 + 一层 `ts_mean`"就够了毁掉一半信号**：S 0.63→0.48、TO 13.8%→5.5%。
+   每多一层平滑就吃掉一截信号——这是平滑的代价，不是参数没调好。
+3. **TO 抬起来不等于变好**：T2/T5 的 TO 也升了 127%–150%，但 S 归零，说明多出来的换手是噪声。
+   判据是「**TO 抬起来且 S 也涨**」，只有 T1 同时做到。
+
+**边界（务必读）**：这套结论**只在因子是"变化量/流量"时成立**。
+同一个 `ts_delta` 骨架套到 EUR 的 `anl15`（水平量信号）上，S 从 1.35 崩到 0.50；
+套到 EUR 的 `cashflow_op/assets` 上 TO 只从 2.35%→2.91%（被 decay 200 吃掉）。
+⇒ **骨架必须在目标 region/universe 上重新扫，不能跨区域搬运**（SKILL.md §8.5.3）。
 
 ### 4.2 低拥挤字段优先策略
 

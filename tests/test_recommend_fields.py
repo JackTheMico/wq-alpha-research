@@ -21,6 +21,7 @@ from recommend_fields import (  # noqa: E402
     is_atom_ready,
     is_blue_sea,
     is_low_quality,
+    pick_theme_scope,
 )
 
 
@@ -345,6 +346,52 @@ class TestClassifyDimension:
     def test_unknown_falls_to_other(self):
         f = _field("random_metric", description="Some random metric")
         assert classify_dimension(f) == "other"
+
+
+# ---------------------------------------------------------------------------
+# 主题作用域选择（--theme）
+# ---------------------------------------------------------------------------
+
+class TestPickThemeScope:
+    """`--theme` 必须挑「倍率最高 + 可解析出 region/universe + PASS」的主题。"""
+
+    def test_picks_highest_multiplier(self):
+        themes = [
+            {"name": "GLB/D1 Power Pool Nov`26", "region": "GLB", "delay": 1,
+             "universe": None, "multiplier": 1.0, "result": "WARNING"},
+            {"name": "EUR/D1 TOPCS1600 Theme", "region": "EUR", "delay": 1,
+             "universe": "TOPCS1600", "multiplier": 2.0, "result": "PASS"},
+            {"name": "EUR/D1/ANALYST Pyramid Theme", "region": "EUR", "delay": 1,
+             "universe": None, "multiplier": 1.3, "result": "PASS"},
+        ]
+        chosen = pick_theme_scope(themes)
+        assert chosen["region"] == "EUR"
+        assert chosen["universe"] == "TOPCS1600"
+        assert chosen["multiplier"] == 2.0
+
+    def test_skips_non_pass_theme(self):
+        """WARNING 表示该主题不适用，倍率再高也不能选。"""
+        themes = [
+            {"region": "GLB", "delay": 1, "universe": "TOP3000",
+             "multiplier": 2.5, "result": "WARNING"},
+            {"region": "EUR", "delay": 1, "universe": "TOPCS1600",
+             "multiplier": 1.1, "result": "PASS"},
+        ]
+        assert pick_theme_scope(themes)["region"] == "EUR"
+
+    def test_skips_theme_without_universe(self):
+        """Pyramid 类主题解析不出 universe，不能单独当作用域。"""
+        themes = [
+            {"region": "EUR", "delay": 1, "universe": None,
+             "multiplier": 3.0, "result": "PASS"},
+            {"region": "EUR", "delay": 1, "universe": "TOPCS1600",
+             "multiplier": 1.0, "result": "PASS"},
+        ]
+        assert pick_theme_scope(themes)["universe"] == "TOPCS1600"
+
+    def test_empty_returns_none(self):
+        assert pick_theme_scope([]) is None
+        assert pick_theme_scope([{"region": None, "universe": None}]) is None
 
 
 # ---------------------------------------------------------------------------

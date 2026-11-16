@@ -2,7 +2,7 @@
 
 ---
 name: wq-alpha-research
-description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expressions, selecting fields/operators, diagnosing simulation and IS check failures, tuning Sharpe/Fitness/Turnover, submitting alphas, and building low-correlation alpha portfolios. Covers the BRAIN HTTP API (auth, multi-simulation, rate limits, recordsets), consultant-tier submission thresholds, and the self-evolution loop. Also use for 中文 requests about WorldQuant、BRAIN、WQ Alpha、顾问权限、因子表达式、回测、提交、换手、Fitness、Sharpe。"
+description: "Use for WorldQuant BRAIN alpha research: confirming the user's active themes and multipliers before mining, designing WQ Alpha expressions, selecting fields/operators, diagnosing simulation and IS check failures, tuning Sharpe/Fitness/Turnover, submitting alphas, and building low-correlation alpha portfolios. Covers the BRAIN HTTP API (auth, multi-simulation, rate limits, recordsets), consultant-tier submission thresholds, theme/multiplier priority, ATOM alpha mining, and the self-evolution loop. Also use for 中文 requests about WorldQuant、BRAIN、WQ Alpha、主题、themes、倍率、multiplier、ATOM alpha、顾问权限、因子表达式、回测、提交、换手、Fitness、Sharpe。"
 ---
 
 # WQ Alpha 研究 Skill
@@ -11,11 +11,43 @@ description: "Use for WorldQuant BRAIN alpha research: designing WQ Alpha expres
 
 ---
 
-## ⚠️ 硬性声明：构造 alpha 前必须运行 recommend_fields.py
+## ⚠️ 硬性声明 ①：开挖前必须先确认用户的 themes，并按倍率排序
 
-**任何 alpha 表达式的构造，第一步必须是运行 `recommend_fields.py` 获取低拥挤字段池。**
+**任何挖掘动作（选字段、套模板、跑仿真）之前，第一步必须是列主题。没有主题清单就不许开工。**
 
 ```bash
+python scripts/preflight.py --themes        # = brain.active_themes()，不耗仿真额度
+```
+
+**为什么这条排在最前面**：主题决定 multiplier，multiplier 直接乘在分数上。同一份工作量放在 ×2.0
+的主题里价值是 ×1.0 的两倍；而**主题外跑出来的 alpha 一律拿不到 multiplier**
+（判定书原话 `Theme EUR/D1 TOPCS1600 Theme does not match with multiplier of 2`）。
+2026-11-15 的教训是硬代价：连续三天全在 GLB/D1 Power Pool（×1.0，且额外三道子区闸门）上
+挖了 20+ 条仿真，而账户里 5 个主题中 4 个是 EUR、最值钱的 ×2.0 也是 EUR——方向整个选错。
+
+**开工三步（缺一步就停下问用户）**：
+
+1. **列主题** → 记下每个主题的 `name / multiplier / scope(region·delay·universe) / result`。
+2. **排序选战场** → 按「倍率 × 可达性」排，不是只按倍率。可达性由 §8.5.2 的门槛结构决定：
+   子区检查只存在于 GLB，EUR 只查 S / 2Y / SubU / Ladder。
+3. **确认作用域一致** → 之后所有 `recommend_fields.py` / `simulate_batch.py` / 提交都必须落在
+   选定主题的 `region × delay × universe` 上。**换 region/universe 前先回到第 1 步重列主题。**
+
+**主题清单为空、或有多个同倍率主题无法区分、或用户明确说要某个主题之外的区域时，
+先问用户，不要自己假设。** 用户的口径永远优先于本 skill 的排序建议。
+
+完整 SOP（含 2026-11-16 实测的 5 主题快照、门槛结构对照、ATOM 骨架选择）见 **§8.5**。
+
+---
+
+## ⚠️ 硬性声明 ②：构造 alpha 前必须运行 recommend_fields.py（在主题作用域内）
+
+**任何 alpha 表达式的构造，第一步必须是运行 `recommend_fields.py` 获取低拥挤字段池。**
+**调用时必须带上第 ① 步确认的主题 scope（region / universe / delay），不允许用默认值蒙。**
+
+```bash
+python scripts/recommend_fields.py --theme        # 自动跟随第 ① 步里倍率最高的主题作用域
+# 或显式指定（必须与主题 scope 一致）：
 python scripts/recommend_fields.py --region <region> --universe <universe>
 ```
 
@@ -31,7 +63,7 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
 
 ---
 
-## ⚠️ 硬性声明：提交需要显式授权，且每天最多 1 条
+## ⚠️ 硬性声明 ③：提交需要显式授权，且每天最多 1 条
 
 **未经用户在本轮对话中明确下达"提交"指令，禁止调用 `POST /alphas/{id}/submit`。**
 "混出候选""跑仿真""看看能不能过线"都不构成提交授权；也**禁止用提交去探测 `PROD_CORRELATION`**（即便 403 不消耗配额）。
@@ -52,6 +84,8 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
 
 | 你要做什么 | 去哪 |
 |---|---|
+| **开工第一步：确认主题与倍率** | `python scripts/preflight.py --themes` → 本文件 §8.5 |
+| **在主题内挖 ATOM / 选骨架 / 压相关** | 本文件 §8.5 |
 | 查「这个族/字段试过没」 | `python scripts/redflag.py <关键词>`（账本 `references/ledger.md`） |
 | 找社区模板 / 论坛方法 | `python scripts/kb.py search <关键词>` / `kb.py templates` |
 | 扫新族、单腿排序、混腿 SOP | 本文件 §8.4 |
@@ -65,16 +99,22 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
 
 ```
 开始
-  └── Step 0: 运行 recommend_fields.py 获取低拥挤字段池
-              python scripts/recommend_fields.py --region <r> --universe <u>
+  └── Step 0: 【强制】列主题，按「倍率 × 可达性」选战场
+              python scripts/preflight.py --themes
+              └── 无主题 / 多主题难分 / 用户指定区外 → 停下来问用户
+              └── 记下所选主题的 region × delay × universe（后续全部落在它上面）
+  └── Step 0.1: 在主题作用域内运行 recommend_fields.py 获取低拥挤字段池
+              python scripts/recommend_fields.py --region <主题region> --universe <主题universe>
               └── 从输出中按经济学维度选择信号字段
   ├── 拉取所有 alpha 列表 ──→ 只看 ACTIVE；算 **日收益** 相关，>0.7 则修改或放弃
+  │                          （EUR 安全线：本地 max corr ≤ 0.61，平台 ≈ 本地 + 0.086，见 §8.5.4）
   ├── 设计新因子
   │    ├── **Step 0.5: 先查结论账本** ──→ python scripts/redflag.py <字段或 dataset>
   │    │                                命中 CLOSED/BLOCKED（退出码 1）→ 换族，别重烧
   │    ├── 字段已验证？ ──否──→ 查第 2 节（本地字段文件搜索 / 模拟 rank(field)）
   │    └── 是 ──→ 若套模板，先过 4.1.1 数据集一致性门槛
   │               （模板信号字段与用户字段同一 dataset，否则混信号 → 停止执行）
+  │         ├── ATOM 单腿骨架 ──→ 先判换手：TO < 8% 说明骨架死了，换 `ts_delta`（§8.5.3）
   │         ├── 基本面 ──→ group_rank + ts_rank, SUBINDUSTRY, decay=0
   │         ├── 分析师 ──→ group_rank + ts_rank, INDUSTRY/SUBINDUSTRY, decay=0–4
   │         ├── 技术 ────→ 高 decay(10–30) 或混合基本面降低换手
@@ -213,6 +253,8 @@ resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
   - 4.1.1 数据集一致性硬门槛（套模板前强制，先于一切构造）
   - 4.1.2 模板库（已标注 dataset）
   - 4.1.3 历史库命中率（2026-10-30 统计，alpha_db.json 127 条，顾问门槛口径）
+  - 4.1.4 社区 ATOM 模板的通用化（`compare_op × ts_op × (d1,d2)` 插槽扫描）
+  - **4.1.5 骨架对照扫描：`ts_delta` 解开换手死锁（7 骨架实测 + 边界）**
   - 4.2 低拥挤字段优先策略
   - 4.2.1 字段拥挤度分层
   - 4.2.2 三道筛选闸门（`recommend_fields.py` 自动执行）
@@ -471,6 +513,145 @@ GLB 无可用第三正交族（全部单腿 FULL，COUNTRY/d4）：分析师修�
 
 ---
 
+## 8.5 主题驱动 ATOM 挖掘 SOP（2026-11-16 定稿，挖之前必读）
+
+> 这一节回答一个问题：**在有限的仿真额度里，怎样把 ATOM 类的单腿小 alpha 挖到主题内、且倍率最高的那个主题里。**
+> 全部数字来自 2026-11-15/16 两天的 40+ 条实测（完整账本见 `references/ledger.md` §17–§18）。
+
+### 8.5.1 第一步永远是列主题，不是选字段
+
+```bash
+python scripts/preflight.py --themes        # = brain.active_themes()，不耗仿真额度
+```
+
+输出即「作用域 + 倍率 + 状态」三件套，**已按倍率降序排好并以「← 建议优先」标出第一条**，
+末尾还会直接打印下一步该跑的命令（`recommend_fields.py --theme`）。
+**2026-11-16 本账户实测快照**（会变，每次开工重跑）：
+
+| 主题 | 倍率 | 状态 | scope | 门槛结构 |
+|---|---:|---|---|---|
+| **EUR/D1/TOPCS1600** | **×2.0** | PASS | EUR · d1 · TOPCS1600 | 无子区检查（§8.5.2） |
+| EUR/D1/ANALYST Pyramid | ×1.3 | PASS | EUR · d1 | 按字段 category 命中 |
+| EUR/D1/FUNDAMENTAL Pyramid | ×1.1 | PASS | EUR · d1 | 按字段 category 命中 |
+| EUR/D1/PV Pyramid | ×1.1 | PASS | EUR · d1 | 按字段 category 命中 |
+| GLB/D1 Power Pool Nov'26 | ×1.0 | WARNING | GLB · d1 | **额外三道子区闸门** |
+
+**两条常被忽略的机制**：
+
+1. **倍率可叠加**。一次提交只要命中多个 PASS 主题，倍率相加：`npaZdvR3` 同时 PASS
+   `TOPCS1600 ×2.0` + `FUNDAMENTAL Pyramid ×1.1`，实际拿 **×3.1**。
+   ⇒ **选字段时优先选能让「区域主题 + 类别主题」同时命中的字段**（EUR 里就是 analyst / fundamental
+   族，而不是纯价量）。
+2. **WARNING 不是失败，也不是适用**。同名 `MATCHES_THEMES` 会有多条，WARNING 只表示"那条主题不适用于这条 alpha"。
+   `npaZdvR3` 上 GLB PP 也是 WARNING，但不影响 ×3.1。判据是「有任一 PASS 即命中」。
+
+**结论口径**：主题清单为空 / 多个同倍率主题无法区分 / 用户明确指定区外 → **停下来问用户**，
+不要自己假设（2026-11-15 的真实误判：连续三天按旧交接文档假设主战场是 GLB PP，
+而账户里 4/5 个主题、且最高倍率都在 EUR）。
+
+### 8.5.2 「倍率最高」不等于「最容易过」：先看门槛结构
+
+同一账户的两个主题，难度结构完全不同：
+
+| 检查项 | EUR（×2.0） | GLB PP（×1.0） |
+|---|---|---|
+| `LOW_SHARPE` | 1.58 | 1.58（PP 通道可低至 1.0） |
+| `LOW_FITNESS` | 1.0 | 1.0 |
+| `LOW_SUB_UNIVERSE_SHARPE` | 0.83–0.86 | 0.8 |
+| `IS_LADDER_SHARPE` | **2.02** | 2.02 |
+| **`LOW_GLB_AMER/EMEA/APAC_SHARPE`** | **不存在** | **各 ≥ 1（硬门槛）** |
+
+三条推论：
+
+1. **子区检查只存在于 GLB。** EUR 的判定书只有 7 条检查，没有 AMER/EMEA/APAC。
+   ⇒ 在 GLB 讨论"美洲过不过 1"对 EUR 完全无意义，别把两个区域的门槛混着用。
+2. **两个区域的病根不同，模板不能互借。** EUR 的病是 **2Y 稳定性（ladder）**，
+   只有 `analyst15` 族能提供（`cashflow_op/assets` 的 2Y 天花板实测 0.92–1.04，永久排除）；
+   GLB 的病是 **分区偏科**（基本面族 AMER 天花板 ≈0.68，无论怎么改公式都上不去）。
+3. **EUR 的门槛可以用 QUICK 预判。** `IS_LADDER_SHARPE` 与 QUICK 的 `LOW_2Y_SHARPE` 同源，
+   不必花 FULL 的额度（FULL 约 10–20 分钟/条）。**只有需要子区数据时才必须 FULL**（GLB 专用）。
+
+### 8.5.3 ATOM 骨架：先判换手，换手 <8% 说明骨架死了
+
+ATOM 的"标准"骨架是双平滑差：
+
+```
+group_neutralize(vector_neut(ts_mean(F,20), ts_mean(F,250)), country)
+```
+
+**它在慢变量上有物理性死锁**：两个均值都已经被磨平，相减后几乎不动 ⇒ **TO 恒在 2–5%**，
+换字段、做归一化都突破不了（2026-11-15 六条对照实测：归一化前后 TO 全部 3%–5%，一动没动，
+而 Sharpe 的上下跳动只是改单位后的随机重排）。
+
+**换手死锁的解法是换 `ts_delta`（直接取增量，不经双重平滑）。** 7 模板对照扫描（同字段同参数，
+基线 = 上式，TO 3.9% / S 0.56 / F 0.39）：
+
+| 模板 | 骨架 | S | F | TO | 判断 |
+|---|---|---:|---:|---:|---|
+| **T1 直接增量** | `rank(ts_delta(F,63))` | **0.63** | **0.48** | **13.8%** | ✅ 三项同时改善 |
+| T3 均线增量 | `ts_delta(ts_mean(F,20),63)` | 0.48 | 0.33 | 5.5% | ⚠️ 多一层平滑吃掉一截信号 |
+| T6 慢腿+反转 | `0.6·慢 + 0.4·反转` | 0.49 | 0.10 | 71.9% | ❌ 撞换手上限 |
+| T7 增量+反转 | `0.7·增量 + 0.3·反转` | 0.16 | 0.02 | 51.1% | ❌ |
+| T4 行业内排名 | `group_rank(F, subindustry)` | 0.14 | 0.03 | 2.1% | ❌ 换手不动 |
+| T2 长期标准化 | `ts_zscore(F,250)` | 0.02 | 0.00 | 8.8% | ❌ 换手高但无信息 |
+| T5 时序分位 | `ts_rank(F,250)-0.5` | −0.05 | −0.01 | 9.8% | ❌ 同上 |
+
+**读法与边界**：
+
+- **判定顺序：先看 TO，再看 S。** TO 抬起来了但 S 归零（T2/T5）= 指针在抖没有信息，不算改善；
+  TO 抬起来且 S 涨（T1）= 真改善。**"换手高"本身不是目标。**
+- **换公式管换手，换字段管分数**：同一套 T1 骨架下，8 个加工字段的 S 差 2.2 倍，而 TO 全在 7%–18%。
+- ⚠️ **快模板不可跨区域套用**：`ts_delta` 在 GLB 把 cfo 从 S 0.56/TO 3.9% 抬到 S 0.63/TO 13.8%，
+  但在 EUR 把 a15 从 S 1.35 打到 0.50（2Y 反而 1.79–1.83 仍在）——
+  因为 **a15 的信号是水平量（level），取增量等于把水平信息丢掉**；而 GLB 的 cfo 是被双重平滑磨死的。
+  ⇒ **模板要按因子自身的频率特性选，先在目标区域做 5–7 个骨架的对照扫描，再扩字段。**
+- ⚠️ **`group_rank` 组内化的适用边界**：对**反转族**有效（S +0.24、DD 4.19%→2.83%）；
+  对**估值族有害**（2Y 从 1.81 掉到 1.37）。不要无脑套。
+
+### 8.5.4 相关性标定：平台 ≈ 本地日收益相关 + 0.086（旧记录 +0.015 是错的）
+
+这是本次最贵的一课，代价是 1 次提交额度：
+
+| 候选 | 本地 max corr | 平台 `SELF_CORRELATION` | 偏差 | 结果 |
+|---|---:|---:|---:|---|
+| `mLearjak6` | 0.658 | **0.7408 / 0.7** | +0.083 | ❌ 被拒 |
+| `npaZdvR3` | 0.586 | **0.6754 / 0.7** | +0.089 | ✅ ACTIVE |
+
+⇒ **标定值 +0.086（±0.003）。选点规则：本地 max corr ≤ 0.61。**
+账本旧记的 +0.015 低估了 5.5 倍，按它选点必然被拒（且被拒不耗当日额度，但浪费一次"当日唯一额度"的窗口）。
+
+**压相关的唯一有效旋钮**（EUR 主题实测）：
+
+- `country → sector → industry` 收紧分组：corr 0.826 → 0.716 → 0.629，**但 S 与 2Y 同步掉**——
+  存在明确前沿，不能一路收到 industry。
+- **降某个腿的权重**：权重转给同族里另一条腿（cfo 0.25→0.15、份额转给 sal）。
+- **cfo 的作用是阈值性的**：0.15 足够托住 ladder（2Y 2.29），降到 0 就崩（2Y 1.42）。
+  所以"去掉拥挤腿"往往不是选项，"改权重 + 换分组"才是。
+- ⚠️ **纯指标最优 ≠ 能过**：`mLearjak6`（S 1.68 / F 1.51）比最终的 `npaZdvR3`（1.62 / 1.39）指标更好，
+  但它过不了相关。**主题内的优先级是「相关 > 指标」。**
+
+### 8.5.5 一轮挖掘的标准循环（命令级）
+
+```bash
+# 1. 列主题（零额度）。输出按倍率降序，第一条标「← 建议优先」，并直接给出下一步命令
+python scripts/preflight.py --themes
+# 2. 在选定主题作用域内扩池（离线零额度）。--theme = 自动跟随倍率最高的主题，避免手填错 scope
+python scripts/recommend_fields.py --theme
+# 3. 查账本，别重烧已关闭的族（零额度）
+python scripts/redflag.py <dataset> ; python scripts/redflag.py --region EUR --open
+# 4. 骨架对照扫描：同字段 × 5–7 个骨架 × QUICK（EUR 约 2–4 分钟/条，GLB/TOP3000 约 8 分钟/条）
+#    并发上限 2 条（5 条会报 Your simulation probably took too much resource）
+# 5. 幸存骨架 × 字段横评：一次 6–8 条 QUICK，看 2Y 与 TO
+# 6. 计算与 ACTIVE 的本地日收益相关（pnl_series + aligned_corr）；本地 ≤0.61 才进下一步
+# 7. FULL 定稿（EUR 通常 1 条足够；GLB 必须 FULL 才能看子区），再逐条提交
+python scripts/submit_one.py <alpha_id> --no-quality --do-submit
+```
+
+**成本纪律**：QUICK 只用来排序，绝不能提交（`Cannot submit QUICK mode alphas`）；
+FULL 只用来定稿；提交只在用户显式授权后做（文首声明 ③）。
+
+---
+
 ## 9. 提交硬闸门与 Checklist
 
 ### 9.0 先记住：指标全绿 ≠ 能提交
@@ -592,11 +773,17 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 35. **PASS 之后永远读不到 prod corr 的数值**：判定书只在 FAIL 时回传数字，ACTIVE 上 `is.prodCorrelation` 恒 0.0。报告里只能写"已过线"，不能写具体值（§7.7.2 坑四）。
 36. **质量优先于数量，别"为了交而交"**：质量差的因子交多了会把 Value Factor 打到 0.10，之后交再多也救不回来。只看 **Fitness / Margin / Returns / Drawdown**：**Fitness ≥ 2.0 才交**（2.5+ 才是好的 regular alpha），**Margin ≥ 10‱**（30‱+ 更佳），DD > Returns 直接否。平台 `LOW_FITNESS=1.0` 只是允许提交，不是值得提交（§5.1.1.1）。
 37. **新 onboard 字段攒满 500 天之前只能看、不能交**：提交时 `LOW_DURATION = 可回测天数 / 500`，而这一项在 QUICK/FULL 的 `is.checks` 里**完全不出现**（2026-11-13 实测 analyst15 `ebg_sector_18mo_marketcap_percent`：仅 50 天历史，S 2.05 / F 2.22 / Margin 65.5‱ 全绿，提交仍被拒）。选字段时用快照 `dateCreated` 年龄先卡 `≥ 500 天`，`preflight` 也会用字段年龄提前阻断；追"最新上线"必须把这条算进去。
-38. **先对齐主题再挖掘，别在主题外白跑**：用户策略是优先挖主题内 alpha（主题外只是拿不到 multiplier，如 `Theme EUR/D1 TOPCS1600 Theme does not match with multiplier of 2`）。开工前先跑 `python scripts/preflight.py --themes` 查当前作用域（`MATCHES_THEMES` 的 `themes[].name/multiplier` 是唯一窗口，`/themes` 404）；查到就按该 region/delay/universe 挖，查不到或不明确就先问用户主题是什么。`gate_report` / `preflight` 默认把「主题已生效但未命中」当阻断，复盘时用 `theme=False` / `--no-theme` 关闭。
+38. **开工第一件事是列主题，并按「倍率 × 可达性」选战场**：先 `python scripts/preflight.py --themes`（`MATCHES_THEMES` 的 `themes[].name/multiplier` 是唯一窗口，`/themes` 404；零额度），记下每个主题的 `multiplier / region / delay / universe / result`。**主题外跑出来的 alpha 一律没有 multiplier**（判定书 `Theme EUR/D1 TOPCS1600 Theme does not match with multiplier of 2`）。主题为空、多个同倍率难分、或用户指定区外 → **停下来问用户**。`gate_report` / `preflight` 默认把「主题已生效但未命中」当阻断，复盘时用 `theme=False` / `--no-theme` 关闭。完整 SOP 见 §8.5。
 39. **开挖前先检索社区与历史库，骨架按插槽扫描而非照抄单一模板**：先 `python scripts/kb.py search <关键词>` / `kb.py pull "ATOM template" -n 10` 把论坛最新模板入库，再按 `compare_op ∈ {subtract, divide, vector_neut} × ts_op ∈ {ts_mean, ts_rank, ts_zscore} × (d1,d2) ∈ {(5,60),(20,120),(20,250)}` 做插槽扫描（至少 9 条），不要只跑 `vector_neut+ts_mean` 一种。调优旋钮见 `references/templates-core.md` §4.1.4：提 Sharpe 用降噪/rank，降换手用 hump/clamp/加长窗口，提覆盖用 `ts_backfill`（仅限稀疏基本面/新闻，勿用于价量）。
 40. **QUICK 模式 alpha 不能提交**：`POST /alphas/{id}/submit` 直接 `400 {"detail":"Cannot submit QUICK mode alphas"}`。选中候选后必须用 **FULL 模式重跑同一表达式**再交（2026-11-14 实测 `zqdX6a0R` → FULL `vRAa38Jb`，指标完全一致，约 4 分钟）。
 41. **主题闸门：命中任一主题即放行**：同名 `MATCHES_THEMES` 会同时出现 PASS 与 WARNING 多条，WARNING 只表示"那条主题不适用"。实测 `vRAa38Jb` 同时 PASS `EUR/D1 TOPCS1600`(x2) + `EUR/D1/ANALYST Pyramid`(x1.3)，另有 `GLB/D1 Power Pool` WARNING —— 按"有 WARNING 就阻断"会误杀 x2.3 的 alpha。`theme_blockers` 已改为「有任一 PASS 直接返回空」。
 42. **低换手族用 `--no-quality` 显式豁免 Fitness 线**：`F = S × sqrt(|Ret| / max(TO, 0.125))`，TO ≈ 2% 时分母恒为 0.125，F ≥ 2.0 等价于要求 Ret ≥ 19%，该族结构性不可达。等价质量判据改为 **Margin ≥ 30‱ 且 DD < Ret**，提交时用 `python scripts/submit_one.py <id> --no-quality --do-submit`。
+43. **倍率可以叠加，一次提交最多吃两张牌**：`npaZdvR3` 同时 PASS `EUR/D1 TOPCS1600 ×2.0` + `EUR/D1/FUNDAMENTAL Pyramid ×1.1` = **×3.1**。⇒ 选字段时优先选能同时命中「区域主题 + 类别主题」的族（EUR 里就是 analyst / fundamental），而不是纯价量（只有 PV Pyramid ×1.1）。
+44. **ATOM 双平滑骨架有换手死锁，换手 <8% 就是骨架死了**：`vector_neut(ts_mean(F,20), ts_mean(F,250))` 的 TO 恒在 2–5%，换字段、做归一化都不动（2026-11-15 六条对照实测：归一化前后 TO 全在 3%–5%，Sharpe 的跳动只是改单位后的随机重排）。**换成 `rank(ts_delta(F,63))` 才能解开**（同字段 TO 3.9%→13.8%、S 0.56→0.63、F 0.39→0.48，三项同时改善）。判据顺序：**先判 TO，再看 S**；TO 抬起来但 S 归零（`ts_zscore`/`ts_rank` 版）是"指针在抖没有信息"，不算改善（§8.5.3）。
+45. **换公式管换手，换字段管分数**：同一 `ts_delta63` 骨架下 8 个加工字段的 S 差 2.2 倍（GLB model109 族 1.31 / 1.09 / 0.87 / 0.78 / 0.61 / 0.59），而 TO 全落在 7%–18%。⇒ 卡在低换手时改骨架，卡在低分数时换字段，两件事不要混着试。
+46. **平台 `SELF_CORRELATION` ≈ 本地日收益相关 + 0.086，不是 +0.015**：`mLearjak6` 本地 0.658 → 平台 **0.7408**（拒）；`npaZdvR3` 本地 0.586 → **0.6754**（过）。旧标定低估 5.5 倍，按它选点必然被拒。**选点规则：本地 max corr ≤ 0.61**。主题内的优先级是「**相关 > 指标**」——指标更好的那条常常过不了相关（§8.5.4）。
+47. **子区检查只存在于 GLB；两个区域的病根不同，方案不能互借**：EUR 判定书只有 7 条检查（无 AMER/EMEA/APAC），病根是 **2Y/ladder**，而 ladder 只有 `analyst15` 族能提供（`cashflow_op/assets` 的 2Y 天花板实测 0.92–1.04）；GLB 多三道子区闸门，病根是 **分区偏科**（基本面族 AMER 天花板 ≈0.68，改公式无效，唯一手段是混入价格反转腿，但会撞换手与 prod corr）。⇒ 在 GLB 讨论"美洲过不过 1"对 EUR 无意义。
+48. **模板不可跨区域迁移，要先在目标区域做骨架对照扫描**：`ts_delta` 在 GLB 提换手提 Sharpe，但在 EUR 把 `anl15` 从 S 1.35 打到 0.50（2Y 反而 1.79–1.83 仍在）——因为 a15 的信号是**水平量**，取增量等于丢掉水平信息。而 EUR 的 decay 200 会把快模板的换手全部吃掉（TO 只从 2.35%→2.91%），因为 EUR 的 `HIGH_TURNOVER` 0.7 根本不紧。⇒ **先跑 5–7 个骨架 × QUICK 的对照扫描（同字段同参数），再扩字段**，别把 A 区的结论搬到 B 区。
 
 ---
 

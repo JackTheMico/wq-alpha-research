@@ -350,17 +350,45 @@ def render(result: dict) -> str:
 
 
 def render_themes(themes: list[dict]) -> str:
-    """挖掘前先看这张表：主题作用域就是该优先挖的 region/delay/universe。"""
+    """挖掘前先看这张表：按倍率从高到低排，并给出下一步该跑什么。
+
+    排序口径：PASS 优先（WARNING 表示该主题已生效但这批 alpha 不适用），
+    同状态内按 multiplier 降序 —— 倍率乘在分数上，同样工作量价值差几倍。
+    """
     if not themes:
-        return "未发现主题（最近 alpha 的 MATCHES_THEMES 为空）"
-    lines = [f"{'=' * 68}", "当前主题（按 MATCHES_THEMES 聚合，PASS > WARNING > PENDING）"]
-    for t in themes:
+        return ("未发现主题（最近 alpha 的 MATCHES_THEMES 为空）。\n"
+                "→ 主题不明就先问用户；确认后仍为空，再用 --region/--universe 显式开挖。")
+    order = {"PASS": 0, "WARNING": 1, "PENDING": 2, "FAIL": 3}
+    ranked = sorted(
+        themes,
+        key=lambda t: (order.get(t.get("result"), 9),
+                       -(t["multiplier"] if isinstance(t.get("multiplier"), (int, float)) else 0)),
+    )
+    lines = [f"{'=' * 68}", "当前主题（按倍率降序，PASS 优先；倍率乘在分数上，先挖最上面那条）"]
+    for i, t in enumerate(ranked):
         scope = f"{t.get('region') or '?'}/D{t.get('delay') or '?'}"
         if t.get("universe"):
             scope += f"/{t['universe']}"
         mult = f"x{t['multiplier']:g}" if isinstance(t.get("multiplier"), (int, float)) else "x?"
-        lines.append(f"  {scope:<22s} {mult:<5s} {t.get('result'):<8s} {t.get('name')}")
-    lines.append("挖掘时优先以上作用域；换 region/universe 前先确认主题，别在主题外白跑。")
+        mark = " ← 建议优先" if i == 0 and t.get("result") == "PASS" else ""
+        lines.append(f"  {scope:<22s} {mult:<5s} {t.get('result'):<8s} {t.get('name')}{mark}")
+
+    top = next((t for t in ranked
+                if t.get("result") == "PASS" and t.get("region") and t.get("universe")), None)
+    lines.append("")
+    if top:
+        lines.append(
+            f"→ 下一步（自动跟随倍率最高的主题，作用域 "
+            f"{top['region']}/D{top.get('delay') or 1}/{top['universe']}）："
+        )
+        lines.append("    python scripts/recommend_fields.py --theme")
+        lines.append("  注意：倍率最高 ≠ 最容易过。先看门槛结构——GLB 多三道子区闸门"
+                     "（AMER/EMEA/APAC 各 ≥1），EUR 只查 S / 2Y / SubU / Ladder（SKILL.md §8.5.2）。")
+    else:
+        lines.append("→ 没有「PASS 且作用域完整」的主题，用 --region/--universe 显式指定，"
+                     "或先问用户目标区域。")
+    lines.append("换 region/universe 前先回到这一步重列主题，别在主题外白跑"
+                 "（主题外一律拿不到 multiplier）。")
     return "\n".join(lines)
 
 

@@ -115,6 +115,7 @@ wq-alpha-research/
 ## What It Helps With
 
 - Search USA TOP3000 delay=1 BRAIN fields locally.
+- **Start from your active themes: rank them by multiplier × feasibility before mining anything.**
 - Build Alpha expressions from common WQ operator patterns.
 - Diagnose low Sharpe, low Fitness, high Turnover, concentrated weights, and sub-universe failures.
 - Compare candidate alphas against existing ACTIVE alphas using daily-return correlation.
@@ -124,6 +125,20 @@ wq-alpha-research/
 ## Quick Start
 
 Read `SKILL.md` first. It contains the actual playbook and trigger instructions.
+
+**Step 0 is always: list the themes you currently hold, then pick the highest-multiplier one you can actually pass.**
+
+```bash
+python scripts/preflight.py --themes        # zero simulation quota
+# e.g. EUR/D1/TOPCS1600 x2 PASS · EUR/D1/ANALYST Pyramid x1.3 PASS · GLB/D1 PP x1.0 WARNING
+```
+
+Multiplier decides how much the same work is worth. An alpha mined outside your themes earns
+no multiplier at all (`Theme EUR/D1 TOPCS1600 Theme does not match with multiplier of 2`),
+and multipliers stack when several themes PASS at once (x2.0 + x1.1 = x3.1).
+Multipliers are not the whole story though — check the gate structure too: GLB carries three
+extra sub-region gates (AMER/EMEA/APAC each ≥ 1) that EUR does not have.
+See `SKILL.md` §8.5 for the full theme-driven ATOM workflow.
 
 For local field lookup:
 

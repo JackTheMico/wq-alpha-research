@@ -541,3 +541,38 @@ def test_submit_verified_returns_verdict_on_403(monkeypatch):
     assert outcome.startswith("submit_blocked(")
     assert "PROD_CORRELATION=0.7621" in outcome
     assert brain.posts == 2
+
+
+# ---------------------------------------------------------------------------
+# 主题渲染：倍率必须排在最前（2026-11-16，开工第一步）
+# ---------------------------------------------------------------------------
+
+class TestRenderThemes:
+    """`preflight.py --themes` 是开工第一步，排序错了就会把精力投到低倍率主题。"""
+
+    def _themes(self):
+        return [
+            {"region": "GLB", "delay": 1, "universe": None, "multiplier": 1.0,
+             "result": "WARNING", "name": "GLB/D1 Power Pool Nov`26"},
+            {"region": "EUR", "delay": 1, "universe": "TOPCS1600", "multiplier": 2.0,
+             "result": "PASS", "name": "EUR/D1 TOPCS1600 Theme"},
+            {"region": "EUR", "delay": 1, "universe": None, "multiplier": 1.3,
+             "result": "PASS", "name": "EUR/D1/ANALYST Pyramid Theme"},
+        ]
+
+    def test_highest_multiplier_first(self):
+        out = preflight.render_themes(self._themes())
+        body = [l for l in out.splitlines() if l.strip().startswith("EUR/D1/TOPCS1600")]
+        assert body, out
+        # EUR x2.0 必须排在 EUR x1.3 与 GLB x1.0 之前
+        idx = {m: out.index(m) for m in ("x2", "x1.3", "x1 ")}
+        assert idx["x2"] < idx["x1.3"] < idx["x1 "]
+
+    def test_recommends_theme_mode(self):
+        out = preflight.render_themes(self._themes())
+        assert "recommend_fields.py --theme" in out
+        assert "TOPCS1600" in out
+
+    def test_empty_themes_asks_user(self):
+        out = preflight.render_themes([])
+        assert "问用户" in out
