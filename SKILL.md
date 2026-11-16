@@ -542,7 +542,7 @@ python scripts/preflight.py --themes        # = brain.active_themes()，不耗�
    `TOPCS1600 ×2.0` + `FUNDAMENTAL Pyramid ×1.1`，实际拿 **×3.1**。
    ⇒ **选字段时优先选能让「区域主题 + 类别主题」同时命中的字段**（EUR 里就是 analyst / fundamental
    族，而不是纯价量）。
-2. **WARNING 不是失败，也不是适用**。同名 `MATCHES_THEMES` 会有多条，WARNING 只表示"那条主题不适用于这条 alpha"。
+2. **WARNING 既不是失败，也不代表适用**。`MATCHES_THEMES` 会一次返回多条，WARNING 只表示"那条主题不适用于这条 alpha"。
    `npaZdvR3` 上 GLB PP 也是 WARNING，但不影响 ×3.1。判据是「有任一 PASS 即命中」。
 
 **结论口径**：主题清单为空 / 多个同倍率主题无法区分 / 用户明确指定区外 → **停下来问用户**，
