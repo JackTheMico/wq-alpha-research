@@ -42,6 +42,7 @@ from wq_api import (  # noqa: E402
     submit_verified,
 )
 from static_check import run_static_check  # noqa: E402
+from stage_check import analyze_stage, render_stage  # noqa: E402
 from field_snapshot import load_snapshot, snapshot_exists  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -154,6 +155,12 @@ def main() -> int:
                     help="豁免快照外字段检查")
     ap.add_argument("--skip-static-check", action="store_true",
                     help="跳过静态检查（不推荐）")
+    ap.add_argument("--skip-stage-check", action="store_true",
+                    help="跳过一二三阶结构检查（跨阶污染/复杂度预算）")
+    ap.add_argument("--max-complexity", type=float, default=8.0,
+                    help="算子复杂度上限（超过判过拟合风险，默认 8.0）")
+    ap.add_argument("--max-same-op", type=int, default=2,
+                    help="同一算子最大重复次数（默认 2）")
     args = ap.parse_args()
 
     if args.file:
@@ -195,6 +202,34 @@ def main() -> int:
     region = overrides.get("region", DEFAULT_SETTINGS["region"])
     universe = overrides.get("universe", DEFAULT_SETTINGS["universe"])
     delay = overrides.get("delay", DEFAULT_SETTINGS["delay"])
+
+    # ---- 阶数结构检查（纯本地，先跑：不联网、不耗额度，能在登录前拦掉结构错误）----
+    if not args.skip_stage_check:
+        stage_errors = []
+        stage_warns = []
+        for name, payload in payloads:
+            expr = payload.get("regular", "")
+            r = analyze_stage(expr, max_complexity=args.max_complexity,
+                              max_same_op=args.max_same_op)
+            if r["errors"]:
+                stage_errors.append((name, r["errors"]))
+            if r["warnings"]:
+                stage_warns.append((name, r["warnings"], r["stage"]))
+
+        if stage_errors:
+            print("\n❌ 阶数结构检查未通过（跨阶污染 / 复杂度超限 / 算子重复）：")
+            for name, errs in stage_errors:
+                print(f"\n  [{name}]")
+                for e in errs:
+                    print(f"    · {e}")
+            print("\n请修复后重试，或加 --skip-stage-check 跳过（不推荐）。")
+            return 1
+
+        for name, warns, stage in stage_warns:
+            print(f"⚠️  [{name}] 阶数={stage}")
+            for w in warns:
+                print(f"    · {w}")
+        print("✅ 阶数结构检查通过")
 
     if not args.skip_static_check:
         brain = BrainSession(credential_file=str(SKILL_DIR / "credential.txt"))

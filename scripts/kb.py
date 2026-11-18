@@ -140,6 +140,87 @@ def pull(c: sqlite3.Connection, query: str, limit: int) -> int:
     return n
 
 
+# --- 检索 -------------------------------------------------------------------
+# FTS5 默认 unicode61 分词器把连续 CJK 当一个整词：「关于一二三阶的一些理解」只有
+# 整串 token，查「一二三阶」命中 0。中文语料占绝对多数，所以 CJK 查询走 LIKE 子串，
+# ASCII 查询仍走 FTS（`trade_when` 这类靠下划线切词的效果很好）。
+CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _terms(query: str) -> list[str]:
+    """空格切词，词间 AND，与 FTS 默认语义一致。"""
+    return [t for t in re.split(r"\s+", (query or "").strip()) if t]
+
+
+def _snippet(text: str, term: str, width: int = 60) -> str:
+    """截取命中词上下文，供 CLI 展示。"""
+    text = (text or "").replace("\n", " ")
+    i = text.lower().find(term.lower())
+    if i < 0:
+        return text[: width * 2]
+    s, e = max(0, i - width // 2), min(len(text), i + len(term) + width)
+    return ("…" if s > 0 else "") + text[s:e] + ("…" if e < len(text) else "")
+
+
+def _like_posts(c: sqlite3.Connection, terms: list[str], limit: int) -> list[dict]:
+    """标题/正文命中：所有词都要出现（AND），标题命中加权最高。"""
+    cond = " AND ".join(["(p.title LIKE ? OR p.text LIKE ?)"] * len(terms))
+    args: list[str] = []
+    for t in terms:
+        args += [f"%{t}%", f"%{t}%"]
+    rows = c.execute(
+        f"SELECT p.id,p.title,p.url,COALESCE(p.text,'') FROM post p WHERE {cond}", args
+    ).fetchall()
+    out = []
+    for pid, title, url, text in rows:
+        score = sum(6 for t in terms if t in (title or ""))
+        score += sum(2 for t in terms if t in text)
+        out.append({"id": pid, "title": title, "url": url,
+                    "snippet": _snippet(text or title or "", terms[0]), "score": score})
+    out.sort(key=lambda r: (-r["score"], r["id"]))
+    return out[:limit]
+
+
+def _like_comments(c: sqlite3.Connection, terms: list[str]) -> dict[int, dict]:
+    """只在回复里命中的帖：正文可能不含关键词，但对检索有价值。"""
+    cond = " AND ".join(["c.text LIKE ?"] * len(terms))
+    args = [f"%{t}%" for t in terms]
+    rows = c.execute(
+        f"""SELECT p.id,p.title,p.url,c.text FROM comment c JOIN post p ON p.id=c.post_id
+            WHERE {cond}""", args
+    ).fetchall()
+    hit: dict[int, dict] = {}
+    for pid, title, url, text in rows:
+        if pid not in hit:
+            hit[pid] = {"id": pid, "title": title, "url": url,
+                        "snippet": f"[回复] {_snippet(text, terms[0])}", "score": 1}
+    return hit
+
+
+def search(c: sqlite3.Connection, query: str, limit: int = 8) -> list[dict]:
+    """统一检索入口：ASCII 走 FTS，含 CJK 或 FTS 无命中则走 LIKE 子串。"""
+    terms = _terms(query)
+    if not terms:
+        return []
+    if not any(CJK.search(t) for t in terms):
+        try:
+            rows = c.execute(
+                """SELECT p.id, p.title, p.url, snippet(post_fts, 1, '[', ']', '…', 12)
+                   FROM post_fts JOIN post p ON p.id=post_fts.rowid
+                   WHERE post_fts MATCH ? LIMIT ?""", (query, limit)).fetchall()
+        except sqlite3.OperationalError:  # 语法错误（括号/引号等）时不当作无结果
+            rows = []
+        if rows:
+            return [{"id": r[0], "title": r[1], "url": r[2],
+                     "snippet": r[3] or "", "score": 0} for r in rows]
+    # CJK，或 ASCII 查询 FTS 没命中 → 子串兜底（语料规模小，全表扫可接受）
+    merged = {r["id"]: r for r in _like_posts(c, terms, limit)}
+    for pid, r in _like_comments(c, terms).items():
+        merged.setdefault(pid, r)
+    out = sorted(merged.values(), key=lambda r: (-r["score"], r["id"]))
+    return out[:limit]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -165,17 +246,9 @@ def main() -> None:
             print(f"{Path(pth).name} -> post {pid}, {n} templates")
         c.commit()
     elif a.cmd == "search":
-        try:
-            rows = c.execute("""SELECT p.id, p.title, p.url,
-                                snippet(post_fts, 1, '[', ']', '…', 12)
-                                FROM post_fts JOIN post p ON p.id=post_fts.rowid
-                                WHERE post_fts MATCH ? LIMIT ?""", (a.query, a.n)).fetchall()
-        except sqlite3.OperationalError:
-            rows = c.execute("""SELECT p.id,p.title,p.url,substr(p.text,1,120) FROM post p
-                                WHERE p.title LIKE ? OR p.text LIKE ? LIMIT ?""",
-                             (f"%{a.query}%", f"%{a.query}%", a.n)).fetchall()
+        rows = search(c, a.query, a.n)
         for r in rows:
-            print(f"{r[0]}\t{r[1]}\n\t{(r[3] or '')[:160]}\n\t{r[2] or ''}")
+            print(f"{r['id']}\t{r['title']}\n\t{(r['snippet'] or '')[:160]}\n\t{r['url'] or ''}")
         if not rows:
             print("无命中")
     elif a.cmd == "show":
