@@ -29,6 +29,7 @@
 | IND | analyst_revision_horizons（surprise） | **BLOCKED** | 1.69（group_rank） | LOW_2Y 0.80；混腿 ladder 1.32 | §15.3 |
 | IND | predictive_starmine | **BLOCKED** | 1.18（EM 20 日均） | 2Y 0.55；revision_count 单腿 0.63 | §15.2 |
 | IND | ai_news_scores | **CLOSED** | 0.27 | 单腿即死 | §15.2 |
+| EUR | ai_news_scores | **CLOSED** | 0.71（`ts_decay_linear(rank(-F),20)`） | 信息半衰期 1 天：任何减速都杀掉信号；换手恒定 148–175%（覆盖空缺驱动）；backfill 降 TO 但符号翻转 −0.30。8 轮 40 条实测，S 天花板 0.71 vs 门槛 1.58 | §20 |
 | IND | intraday_pv_feats | **CLOSED** | −0.08 | 单腿即死 | §15.2 |
 | IND | model28 | **CLOSED** | 0.02 | 单腿即死 | §15.2 |
 | IND | analyst11 | **CLOSED** | 0.22 | 单腿即死 | §15.2 |
@@ -117,6 +118,12 @@
 | EUR | news20 | `rank(nws20_multiple_comp_d1_qep)`（新闻情绪分） | — | **ERROR** `rank` 不支持 event 输入，需先事件聚合 | UNTESTED | §16.2 |
 | EUR | analyst9 | `rank(vec_avg(anl9_sconsensusv2span_cashflowstatement_dataitemvalue))` | 0.49 | 7 个 value 字段全测，最高 0.52（除 cap）；2Y 1.41 差 0.17；28 个字段中 21 个是时间戳/拆股因子非信号 | CLOSED | §16.6 |
 | EUR | other455 | Node2Vec 竞争者聚类标签 168 个 | — | 与 pv30 同类分组字段，预期同 unit 问题 | UNTESTED | §16.1 |
+| EUR | ai_news_scores | `negative_score_confidence_upper_bound_2`（原式 `-rank(...)`，`j2a191MW`） | 0.59 | TO 164% / F 0.09 / 2Y 0.22；唯一 PASS 是 SubU | CLOSED | §20 |
+| EUR | ai_news_scores | 同上 `ts_decay_linear(rank(-F),20)` SUBIND（`pwa88KaX`） | **0.71** | 族内最高 S，但 TO 149.6% 撞上限；MARKET 中性化反而 −0.14 | CLOSED | §20 |
+| EUR | ai_news_scores | `ts_mean(rank(pos_avg-neg_avg),5)`（`RReddgMz`） | 0.62 | 形态最优（TO 57% / DD 4.6% / 2Y 1.00）但幅度差 0.96；纯幅度问题非鲁棒性问题 | CLOSED | §20 |
+| EUR | ai_news_scores | `rank(-neg_avg)` / `rank(pos_avg)` / `rank(-neut_avg)` | 0.50 / **−0.47** / **−0.53** | 三腿同指「有无新闻」=关注度折价；合成 `-rank(pos+neg)` 仅 0.53，不优于单腿 | CLOSED | §20 |
+| EUR | ai_news_scores | `rank(-ts_backfill(F,20))` | −0.30 | TO 36.3% 但符号翻转：新鲜坏消息动量、陈旧坏消息反转 | CLOSED | §20 |
+| EUR | ai_news_scores | `trade_when(F>0, rank(-F), -1)` 持仓保持 | −0.22 | 直接验证"信号只活 1 天"，持有即变反向暴露 | CLOSED | §20 |
 | CHN | fundamental27 | `rank(fnd27_..._cash_pay_goods_purch_serv_rec_value / ts_mean(...,252))` | −0.82 | 加负号无效（−1.60）；2Y 0.02 FAIL | CLOSED | §16.3 |
 | CHN | fundamental5 | `rank(fnd5_cur_212_21_af_si)`（净利率） | −0.19 | 2Y −1.03 FAIL | CLOSED | §16.3 |
 | CHN | analyst14 | `rank(anl14_high_opp_fy2)` | −0.50 | 加负号/backfill 均无效（−0.19 / −0.27） | CLOSED | §16.3 |
@@ -1533,3 +1540,58 @@ EUR / TOPCS1600 / delay 1 / MARKET / decay 200 / truncation 0.08
 平台 `SELF_CORRELATION` ≈ 本地日收益相关 **+0.086**（`mLearjak6` 0.658→0.7408、
 `npaZdvR3` 0.586→0.6754 两点标定）。**选点规则：本地 max corr ≤ 0.61。**
 旧值 +0.015 低估 5.5 倍，按它选点必然被拒。
+
+---
+
+## §20 `ai_news_scores` 在 EUR/TOPCS1600 的天花板：0.71（2026-11-17，8 轮 40 条）
+
+**任务**：用户给定 `j2a191MW` = `-rank(negative_score_confidence_upper_bound_2)`
+（S 0.59 / F 0.09 / TO 164% / 2Y 0.22），要求改造成「优质 ATOM alpha」。
+
+**结论：不可行。** 单数据集信息上限 ≈ 0.71，顾问门槛 1.58。不提交。
+
+### 20.1 四条硬发现（每条都有反证实验）
+
+1. **字段是别名，ATOM 无腿可混。** 数据集列 105 个字段 = 3 情绪 × 7 统计量；
+   `_2 / _3 / 无后缀` 三个"变体"在 EUR 上给出**精确相同**的 0.59 / 164.0% / 3.68% / 9.4%。
+   ⇒ 「同数据集多腿正交」这条 ATOM 主武器在这里完全无效。
+
+2. **只有负面一侧有信息，且真正被定价的是「有没有新闻」。**
+   `rank(pos_avg-neg_avg)` = 0.02（正负相消）；`rank(pos_avg)` = **−0.47**；
+   `rank(-neut_avg)` = **−0.53**。三条腿同指「关注度折价」而非情绪极性。
+   但合成 `-rank(pos_avg+neg_avg)` 只有 0.53，**不优于单用 `-neg_upper` 的 0.59**。
+
+3. **信息半衰期 ≈ 1 天，任何减速都杀死信号。**
+   先平滑再排序：`rank(-ts_mean(F,5))` 0.18、窗口 20 → 0.01；
+   先排序再平滑：`ts_mean(rank(-F),5)` 0.16、窗口 10 → −0.10。
+   **两种顺序都杀掉** ⇒ 不是算子顺序问题，是信息真的只活一天。
+
+4. **换手 148–175% 是结构性属性，不是构造缺陷。**
+   去掉 `rank` 直接用原始分数 `−F`，TO 反而升到 174.7%（排除了"并列值导致 rank 抖动"的假设）；
+   唯一能把 TO 压到 36% 的手段是 `ts_backfill`，但**符号翻转为 −0.30**
+   —— 新鲜坏消息继续跌、陈旧坏消息反弹。
+   `trade_when(F>0, rank(-F), -1)` 持仓保持给出 **−0.22**，直接验证了"持有即反向暴露"。
+
+### 20.2 各角度的最优解（可供将来复用）
+
+（用列表而非表格，避免被 `redflag.py` 误解析成字段行）
+
+- **Sharpe 最高**：`ts_decay_linear(rank(-F),20)` + SUBINDUSTRY → S 0.71 / F 0.12 / TO 149.6% / Margin 6.1‱ / DD 9.8% / 2Y 0.60
+- **形态最干净**：`ts_mean(rank(pos_avg-neg_avg),5)` → S 0.62 / F 0.12 / TO 57.0% / Margin 8.1‱ / DD 4.6% / 2Y 1.00
+- **2Y 最高**：`-ts_mean(F,5)`（不排序）→ S 0.54 / F 0.13 / TO 58.1% / Margin 11.6‱ / DD 10.7% / 2Y 1.10
+- **Margin 最高**：`ts_mean(rank(net),20)` + decay10 → S 0.49 / F 0.16 / TO 13.5% / Margin 22‱ / DD 5.2% / 2Y −0.11
+
+⚠️ **「形态最优」与「分数最优」在这族里是两条不同的路**：`RReddgMz` 的 DD/Ret = 2.0、2Y 1.00 且逐年改善，
+问题**纯粹是幅度不足**，不是鲁棒性不足——这在「病根是 2Y」的 EUR 里是稀缺品质。
+将来若要拿它当混腿素材，它是唯一值得保留的一条（TO 合格、DD 极低、2Y 达标，只缺 Sharpe）。
+
+### 20.3 机制层面的可迁移教训
+
+- **新闻类快信号的换手来源是「覆盖空缺」而不是「信号波动」**。
+  诊断方法：先去 rank 看 TO 是否下降。若不变 ⇒ 换手源于数据可得性，平滑无用，
+  只能靠 backfill 或 `trade_when` 持仓；而这两者会改变信号的经济含义（本条族里都导致翻转）。
+- **`-rank(field)` 的符号稳定性必须用 `ts_backfill` 版本做对照**：
+  同一字段 fresh 版 +0.59、stale 版 −0.30，差 0.89 个 Sharpe ⇒ 该信号是纯同日冲击。
+  这个对照（2 条仿真）比 5 个骨架扫描更能定性信号的时间结构。
+- **低覆盖率数据集（cov 0.79）在 EUR 小宇宙上天然高换手**，与 USA/TOP3000 的表现不可互推。
+

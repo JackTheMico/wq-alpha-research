@@ -86,8 +86,10 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
 |---|---|
 | **开工第一步：确认主题与倍率** | `python scripts/preflight.py --themes` → 本文件 §8.5 |
 | **在主题内挖 ATOM / 选骨架 / 压相关** | 本文件 §8.5 |
+| **判一条表达式的阶数、查跨阶污染** | `python scripts/stage_check.py "<expr>"` → 本文件 §13 |
+| **该不该上三阶 / 该删哪一层** | 本文件 §13.4 |
 | 查「这个族/字段试过没」 | `python scripts/redflag.py <关键词>`（账本 `references/ledger.md`） |
-| 找社区模板 / 论坛方法 | `python scripts/kb.py search <关键词>` / `kb.py templates` |
+| 找社区模板 / 论坛方法 | `python scripts/kb.py search <关键词>` / `kb.py templates`（中文走子串、英文走 FTS；空格分隔即 AND，多写几个词能显著提准） |
 | 扫新族、单腿排序、混腿 SOP | 本文件 §8.4 |
 | 某条 IS 检查 FAIL 不懂含义 | `references/checks.md` |
 | 写 API 调用 / 分页 / 轮询 | `references/api.md` |
@@ -114,6 +116,9 @@ python scripts/recommend_fields.py --region <region> --universe <universe>
   │    ├── 字段已验证？ ──否──→ 查第 2 节（本地字段文件搜索 / 模拟 rank(field)）
   │    └── 是 ──→ 若套模板，先过 4.1.1 数据集一致性门槛
   │               （模板信号字段与用户字段同一 dataset，否则混信号 → 停止执行）
+  │         ├── **Step 0.6: 定层次** ──→ 这条 alpha 要走到几阶？（§13.2）
+  │         │                            零阶裸字段有没有 PnL 形状？没形状就别急着上 ts_*
+  │         │                            `python scripts/stage_check.py "<expr>"` 查污染/复杂度
   │         ├── ATOM 单腿骨架 ──→ 先判换手：TO < 8% 说明骨架死了，换 `ts_delta`（§8.5.3）
   │         ├── 基本面 ──→ group_rank + ts_rank, SUBINDUSTRY, decay=0
   │         ├── 分析师 ──→ group_rank + ts_rank, INDUSTRY/SUBINDUSTRY, decay=0–4
@@ -289,6 +294,7 @@ resp = session.post("https://api.worldquantbrain.com/simulations", json=payload)
 | **Fitness < 1.0 且 TO < 12.5%** | 分母被 0.125 地板锁死，降 TO 无效；缺的是 Returns | **第一顺位：把 neutralization 从 SUBINDUSTRY 换成 INDUSTRY**（2026-10-30 同一表达式实测 F 0.95→1.08、Returns 4.47%→5.32%、TO 只从 8.0% 动到 7.4%）。第二顺位提 Sharpe。❌ 不要靠降 decay 提 TO（见 §5.1 推论 2） |
 | Sharpe < 1.25 | 信号弱 | 拉长窗口、group_rank、换字段 |
 | TO > 50% | 信号变化太快 | decay 10–30、trade_when、混合 |
+| **TO 恒定在 150%+ 且平滑无效**（低覆盖率数据集，cov < 0.85） | **换手来自「覆盖空缺」而非信号波动**：NaN 日持仓进出 → 先查：**去掉 `rank` 直接用原始分数看 TO 是否下降**；不降即证实是可得性问题。此时平滑只会杀掉信号，唯一手段是 `ts_backfill`（可能翻转符号）或 `trade_when` 持仓保持（可能变成反向暴露）——两者都会改变经济含义，须各跑 1 条对照确认符号。实测见 ledger §20 |
 | DD > 15% | 波动大/杠杆高 | 增大 decay、降 truncation、混合低波信号 |
 | CONCENTRATED_WEIGHT FAIL | 稀疏/极值 | rank()、truncation 0.05、ts_backfill |
 | Sub-Universe FAIL | 小票依赖 | 避免 `rank(-assets)`，用 group_rank、加流动性过滤 |
@@ -784,6 +790,10 @@ python scripts/preflight.py RREmY1Qe --json --skip-crowding
 46. **平台 `SELF_CORRELATION` ≈ 本地日收益相关 + 0.086，不是 +0.015**：`mLearjak6` 本地 0.658 → 平台 **0.7408**（拒）；`npaZdvR3` 本地 0.586 → **0.6754**（过）。旧标定低估 5.5 倍，按它选点必然被拒。**选点规则：本地 max corr ≤ 0.61**。主题内的优先级是「**相关 > 指标**」——指标更好的那条常常过不了相关（§8.5.4）。
 47. **子区检查只存在于 GLB；两个区域的病根不同，方案不能互借**：EUR 判定书只有 7 条检查（无 AMER/EMEA/APAC），病根是 **2Y/ladder**，而 ladder 只有 `analyst15` 族能提供（`cashflow_op/assets` 的 2Y 天花板实测 0.92–1.04）；GLB 多三道子区闸门，病根是 **分区偏科**（基本面族 AMER 天花板 ≈0.68，改公式无效，唯一手段是混入价格反转腿，但会撞换手与 prod corr）。⇒ 在 GLB 讨论"美洲过不过 1"对 EUR 无意义。
 48. **模板不可跨区域迁移，要先在目标区域做骨架对照扫描**：`ts_delta` 在 GLB 提换手提 Sharpe，但在 EUR 把 `anl15` 从 S 1.35 打到 0.50（2Y 反而 1.79–1.83 仍在）——因为 a15 的信号是**水平量**，取增量等于丢掉水平信息。而 EUR 的 decay 200 会把快模板的换手全部吃掉（TO 只从 2.35%→2.91%），因为 EUR 的 `HIGH_TURNOVER` 0.7 根本不紧。⇒ **先跑 5–7 个骨架 × QUICK 的对照扫描（同字段同参数），再扩字段**，别把 A 区的结论搬到 B 区。
+49. **阶是「加工方式」，不是经济逻辑**（2026-11-17 论坛归纳，§13）：零阶预处理 → 一阶 `ts_*` 提信号 → 二阶 `group_*` 去暴露 → 三阶 `trade_when` 门控，四类是**算子族边界**而非金融理论。一条没有经济含义的表达式跑完三阶，只会得到一条过拟合且好看的表达式。⇒ 先选故事，再定层次。
+50. **三阶是精炼器不是生成器，默认不开**：论坛实测有作者逐层拆掉三阶结构后 Sharp 0.67→0.85；另一作者流程「默认只跑到二阶，三阶手动触发」。启用三阶的唯一正当理由是「信号已成立，但 turnover / regime 有问题需要修剪」，且**必须保留二阶结果作对照**才能判断这层有没有用（§13.4）。
+51. **跨阶污染能在仿真前拦掉，且必须拦**：二阶/一阶算子包裹 `trade_when` = 三阶结果被重套，表达式越滚越长而指标不动。`python scripts/stage_check.py "<expr>"` 已做成闸门并接进 `simulate_batch.py`（**登录前**运行，零额度）。同时检查算子复杂度预算（默认 8.0）与同算子重复（默认 ≤2 次）——后者拦 `zscore(zscore(x))` 这类无意义嵌套。
+52. **`group_neutralize` 不总是对，判据是「你要相对同行的溢价，还是全市场的稀缺度」**：对行业性极强的字段（借贷紧张度、做空拥挤、监管敏感行业），neutralize 会把这个行业「本来就该贵」的截面信息一起抹平。§10-6「SUBINDUSTRY 通过率最高」是统计口径的通过率，不是无条件规则。⇒ 这类族先跑 `group_rank` 与 `rank` 的对照再决定（§13.3）。
 
 ---
 
@@ -885,3 +895,124 @@ python scripts/redflag.py --region IND --open # 该区还有哪些族没关闭
 | 2026-11-06 | 正交第三腿换族（USA: SBC/buzz/attendance；ASI: analyst4 EPS 修正） | **USA 三条正交腿单腿全废**（SBC −0.25 / buzz −0.35 / 出席变更 −0.30），混合后 −0.35–0.03，方向在 USA 不成立；**ASI 的 analyst4 极冷（alphaCount 1–3）、EPS 修正 126 天单腿 S 0.88，混入 25% 后把 prod corr 从 0.876 压到 0.7244**（S 1.86 / F 1.21 / JPN 1.01 / ladder 2.13 / robust 全 PASS），但仍差 0.024；**再加分析师权重会先打死 JPN 子区**（35% → 0.82、40% → 0.71），所以这条路的上限就是「接近但过不去」 |
 | 2026-11-06 | 换更强的分析师腿：sales 修正 / 覆盖数变化 / 季度 EPS 修正 / 三期合成 | **sales 修正腿（单腿 0.68）混入 25% 后 `LLMENAL2` S 1.81 / JPN 1.20 / ladder 2.04 PASS，但 prod corr 0.7394，比 EPS 版更差**；其余三条腿（覆盖数、季度 EPS、三期合成）ladder 直接 FAIL。**sales 腿加到 30% 起 ladder 断崖掉线（1.56/1.49）** ⇒ 该骨架 prod corr 天花板 0.72–0.74，无法在保住 ladder/JPN 的前提下压到 0.70；**更冷的 alphaCount 不等于更低 prod corr**，analyst4 的 EPS/sales 修正属同一经济族，换字段不换族 |
 | 2026-11-06 | ASI 第三族可用性：期权族 / 事件族 / fundamental17 FCF | **ASI 无任何 `option*` 数据集（158 个 dataset 全量枚举），期权族整族不可用**；**事件族字段是 event input，`ts_backfill`/`ts_*` 直接 400（`does not support event inputs`），必须先 `vec_avg` 聚合**；事件单腿上限 0.78（`event_stock_model.earnings_financial_event_score_2`，且 2Y FAIL），`news104` 0.31；`fnd17_fcfmtt/cap` 1.08 但 ladder 1.57 WARNING 且与 `cashflow_op` 同族 ⇒ **ASI 该骨架第三腿空间关闭，止于 robust 90% + prod corr 0.72–0.74 双天花板** |
+
+
+---
+
+## 13. 一二三阶框架：什么时候该加层、什么时候该删层
+
+> 来源：2026-11-17 中文顾问论坛 12 篇帖（“一二三阶”）抓取归纳，完整报告见
+> [`reports/yiersan-stage-framework.md`](reports/yiersan-stage-framework.md)。
+> 机器可查：`python scripts/stage_check.py` / `python scripts/kb.py search "一二三阶"`。
+>
+> **这一节解决一个我们此前流程里的空白**：§8.5 解决「挖什么」，§9 解决「能不能交」，
+> 但没有回答「这条表达式该做几层、每层的职责边界在哪、层数怎么砍」。答案在这里。
+
+### 13.1 各阶的职责边界（唯一口径）
+
+| 阶 | 算子族 | 职责 | 不该做的事 |
+|---|---|---|---|
+| **零阶** | `ts_backfill` `winsorize` `vec_*` `rank` `zscore` 基础代数 | 把字段变成可加工对象（量纲、缺失、向量聚合） | 不做信号表达 |
+| **一阶** | `ts_rank` `ts_delta` `ts_mean` `ts_zscore` `ts_std_dev` … | **提出信号**（水平→动量/反转/偏离） | 不堆 5–6 个算子（论坛实测：robust 与 prod corr 双双变难看） |
+| **二阶** | `group_rank` `group_neutralize` `group_zscore` `group_scale` | **截面重组**（去暴露） | 不无脑 neutralize（见 13.3） |
+| **三阶** | `trade_when` | **门控**（何时持仓 / 何时空仓） | 不是"造"信号的手段；只能是最后一步 |
+| 四阶 | `hump` `vector_neut` `regression_neut` `ts_target_tvr` | 组合与风险调整 | 不要用在非顶级候选上 |
+
+**关键性质**：阶数边界 = `ts_*` → `group_*` → `trade_when` 三类算子族的边界，
+源头是社区 `machine_lib` 的三个 factory 函数。所以"阶"是**工程分层**，不是金融理论。
+
+**最重的一句**（论坛原话）：
+> 「1、2、3 阶是『加工方式』；[某些数据集] 更缺的是『加工对象选对了没有』。」
+
+⇒ **阶数增加 ≠ 质量提升。** 二三阶是精炼器不是生成器。一条没有经济含义的表达式，
+跑完三阶只会得到一条过拟合的、还算好看的表达式。
+
+### 13.2 用 `stage_check.py` 判阶（零额度，仿真前先跑）
+
+```bash
+python scripts/stage_check.py "<expr>"              # 人读格式
+python scripts/stage_check.py "<expr>" --json       # 机器读
+python scripts/stage_check.py --file variants.json --quiet   # 批量
+```
+
+`simulate_batch.py` 已内置这道闸门（`--skip-stage-check` 可关，`--max-complexity` /
+`--max-same-op` 可调），**它在登录前就运行**——结构错误不该花掉一次登录和一堆字段检查。
+
+它检查四件事：
+
+| 检查项 | 拦什么 | 依据 |
+|---|---|---|
+| **跨阶污染** | 二阶/一阶算子包裹 `trade_when` | 三阶必须是最后一步，外面再套 `group_*` 只是在给门控结果加噪声 |
+| **复杂度预算** | 算子加权总分 > 8.0（默认） | 权重 零阶 1.0 / 一阶 1.5 / 二阶 1.5 / 三阶 2.0 / 四阶 2.0，`ts_rank`/`ts_zscore`/`ts_ir` 等带估计的再加 0.5 |
+| **同算子重复** | 同一算子出现 > 2 次 | 拦 `zscore(zscore(x))` 这类无意义嵌套 |
+| **VECTOR 未聚合** | `ts_*` 直接包裹 `nws*`/`oth*`/`rsk*` 等向量字段 | 会报 `does not support event inputs`（§3 已记录，这里做成自动检测） |
+
+实测样例：
+
+```
+$ python scripts/stage_check.py "group_rank(trade_when(volume>ts_mean(volume,20), rank(cashflow_op), -1), subindustry)"
+❌ 阶数=3（三阶/门控）  复杂度=5.0  FAIL
+   ❌ 跨阶污染：group_rank（二阶/截面）包裹了 trade_when（三阶）。
+```
+
+### 13.3 二阶的分歧：什么时候 **不该** neutralize
+
+这是论坛里最反直觉的一条，也是对 §10 第 6 条「SUBINDUSTRY 通过率最高」的重要限定：
+
+> 「借贷紧张在部分行业是常态。`group_neutralize` 能降相关、过检，
+> 但也可能把『这个行业就是借不到券』的截面信息抹平。」
+
+**判据**：问自己「我要的是*相对同行的溢价*，还是*全市场的稀缺度*」。
+- 前者 → 该 neutralize；
+- 后者 → 不该，neutralize 会杀掉信号本身。
+
+§10-6 的「SUBINDUSTRY 通过率最高」是**统计口径的通过率**（因为多数族是行业暴露噪声），
+不是无条件规则。对**行业性极强的字段**（借贷、做空拥挤、监管敏感行业），先跑一条
+`group_rank` 与一条 `rank` 的对照，再决定。
+
+### 13.4 该不该上三阶：三条判据
+
+论坛里三阶的采用是**分歧**的，不是共识：
+
+| 证据 | 内容 |
+|---|---|
+| 某作者流程 | 「默认自动运行到二阶，三阶保留为手动触发」，因为二阶已提供足够候选 |
+| 另一作者实测 | 逐层拆掉三阶结构后 **Sharpe 0.67 → 0.85** |
+| Option8/9 | 一二阶已无一条达标，作者直接放弃三阶（判断正确，省了配额） |
+
+**启用三阶的唯一正当理由是「带着具体问题去修」，而不是默认打开：**
+
+1. 已有信号是否只在某种状态下有效？（regime）
+2. 加门控后，换手 / 收益 / 覆盖分别怎么变？
+3. **必须保留二阶结果作对照**——没有对照就无法判断这一层有没有用。
+
+⚠️ **门控方向极易写反**（§10 已有实测记录）：`trade_when` 的 condition 是
+「**允许**交易时为真」。写反的后果是趋势真正启动那天恰好被门掉。
+写之前先明确：**你希望在什么状态下「不动仓」**，再取反。
+
+⚠️ **降换手不要先想三阶**。优先级：`decay` 微调 → 加长窗口 → `clamp` →
+最后才是 `trade_when`。且 `decay` 拉太长会把 edge 一起平滑掉
+（实测 turnover 0.55→0.30 但 Sharpe 1.3→0.9，§10-19 同源）。
+
+### 13.5 跨阶污染的两个工程解法
+
+我们的流程是**单条 alpha 手搓 + 批量仿真**，不是社区那种三阶 factory 流水线，
+所以不会天然产生「二阶结果被反复重套」的问题。但只要做过**批量变体生成**
+（`--file variants.json`），就会踩到同一类坑：
+
+1. **来源标记**：表达式最前面加 `/*T1*/` 形式的注释（不运行、不计入算子数），
+   变体生成时按标记隔离，避免"三阶结果又被二阶模板包一层"。
+2. **续跑用快照不用游标**：只保存「跑到第几条」不够——重启时重新查询候选，
+   列表已经变了，旧进度会错位。**存本轮候选列表快照。**
+
+### 13.6 与本 skill 现有结论的对应关系（避免重复造轮子）
+
+| 论坛说法 | 本 skill 已有的等价结论 | 处理 |
+|---|---|---|
+| 「先看裸字段有没有 PnL 形状」 | §2.3 字段验证（`rank(field)` 先跑） | 一致，已并入决策树 Step 0.6 |
+| 「换手由骨架决定，分数由字段决定」 | §10-45「换公式管换手，换字段管分数」 | **完全一致**，§8.5.3 的 7 骨架扫描就是它的实证 |
+| 「复杂度要控制，否则过拟合」 | 无 | **新增**，已做成 `--max-complexity` |
+| 「三阶可跳过 / 删层反而更好」 | 无 | **新增**，§13.4 |
+| 「相关性调参无效，必须换族」 | §10-24/25/16、§8.4 | **完全一致**，论坛再次印证 |
+| 「decay 拉长会杀 edge」 | §10-19 | 一致 |
+| 「`group_neutralize` 可能抹掉信号」 | §8.5.3 有 `group_rank` 对反转族有效/对估值族有害 | **补充**：把「分组该不该做」上升为判据（13.3） |
